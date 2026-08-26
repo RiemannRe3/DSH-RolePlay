@@ -2,4 +2,3 @@ lib/
 node_modules/
 .local/
 *.tgz
-!test-assets/evidence/dsh-rc7/suite-1.0.0/installed-bundle.tgz

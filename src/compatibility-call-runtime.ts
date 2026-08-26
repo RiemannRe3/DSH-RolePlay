@@ -4,8 +4,10 @@ export type CompatibilityCallDescriptor = {
   surface: CompatibilitySurface;
   method: string;
   dshAction: string;
-  effect: "只读" | "本地执行" | "持久化写入" | "正式消息提交";
+  effect: "只读" | "本地执行" | "辅助模型生成" | "持久化写入" | "正式消息提交";
 };
+
+export const TAVERN_HELPER_COMPATIBILITY_VERSION = "4.9.3-dsh.1";
 
 const catalog: readonly CompatibilityCallDescriptor[] = [
   { surface: "TavernHelper", method: "getVariables", dshAction: "读取当前 Session 变量投影", effect: "只读" },
@@ -13,6 +15,8 @@ const catalog: readonly CompatibilityCallDescriptor[] = [
   { surface: "TavernHelper", method: "replaceVariables", dshAction: "原子替换当前 Session 变量状态", effect: "持久化写入" },
   { surface: "TavernHelper", method: "insertOrAssignVariables", dshAction: "合并后原子提交当前 Session 变量状态", effect: "持久化写入" },
   { surface: "TavernHelper", method: "getChatMessages", dshAction: "读取 DSH Session 消息与变量投影", effect: "只读" },
+  { surface: "TavernHelper", method: "setChatMessages", dshAction: "将首条 assistant 消息的 swipe 映射到当前 Session 开场", effect: "持久化写入" },
+  { surface: "TavernHelper", method: "generate", dshAction: "使用当前 Session 绑定生成辅助文本，不写入正式 Conversation", effect: "辅助模型生成" },
   { surface: "TavernHelper", method: "getWorldbook", dshAction: "读取当前卡绑定的世界书投影", effect: "只读" },
   { surface: "TavernHelper", method: "getWorldbookNames", dshAction: "读取当前卡世界书名称", effect: "只读" },
   { surface: "TavernHelper", method: "getCharWorldbookNames", dshAction: "读取当前卡世界书绑定", effect: "只读" },

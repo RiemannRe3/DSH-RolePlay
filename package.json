@@ -1,21 +1,22 @@
 {
   "name": "dsh-re3-rp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "license": "MIT",
   "author": "RiemannRe3",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/RiemannRe3/DSH-Re3-RP.git"
+    "url": "git+https://github.com/RiemannRe3/DSH-RolePlay.git"
   },
   "bugs": {
-    "url": "https://github.com/RiemannRe3/DSH-Re3-RP/issues"
+    "url": "https://github.com/RiemannRe3/DSH-RolePlay/issues"
   },
-  "homepage": "https://github.com/RiemannRe3/DSH-Re3-RP#readme",
+  "homepage": "https://github.com/RiemannRe3/DSH-RolePlay#readme",
   "type": "module",
   "main": "./lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
+    "./card-library": "./lib/card-library.js",
     "./card-runtime": "./lib/card-runtime.js",
     "./worldbook": "./lib/worldbook.js",
     "./prompt-compiler": "./lib/prompt-compiler.js",
@@ -29,12 +30,14 @@
     "./split-mvu": "./lib/split-mvu.js",
     "./compatibility-call-runtime": "./lib/compatibility-call-runtime.js",
     "./mvu-session-control": "./lib/mvu-session-control.js",
+    "./auxiliary-generation": "./lib/auxiliary-generation.js",
     "./package.json": "./package.json"
   },
   "files": [
     "cordis.patch.yml",
     "lib/index.js",
     "lib/client.js",
+    "lib/card-library.js",
     "lib/card-runtime.js",
     "lib/worldbook.js",
     "lib/prompt-compiler.js",
@@ -49,6 +52,7 @@
     "lib/split-mvu.js",
     "lib/compatibility-call-runtime.js",
     "lib/mvu-session-control.js",
+    "lib/auxiliary-generation.js",
     "runtime-assets/standalone/core.js",
     "runtime-assets/standalone/index.html",
     "runtime-assets/standalone/style.css",
@@ -84,17 +88,17 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-agent-default-model": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-client-ui-conversation": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-client-ui-layout": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-client-ui-primitives": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-client-ui-sidebar": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-client-ui-slots": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-host-webserver": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-session": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-storage-domain": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-agent": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-agent-default-model": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-runtime": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-layout": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-session": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-storage-domain": "0.1.1-rc.2",
     "react": "^18.2.0",
     "zod": "^4.0.0"
   },

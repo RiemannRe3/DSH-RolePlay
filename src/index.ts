@@ -4,14 +4,16 @@ import { NORMALIZED_CARD_INDEX_VERSION, parseCard, sha256, type NormalizedCard }
 import { activateWorldbookWithRenderer, normalizeWorldbookEntry, placeWorldbook, substituteCardMacros, type WorldbookActivation } from "./worldbook.js";
 import { applyCompiledPromptToRequest, compileTavernPrompt, compiledTavernSystemPrompt, normalizeTavernChatMessages, renderTavernContextEnvelope, type CompiledTavernPrompt } from "./prompt-compiler.js";
 import { DEFAULT_TAVERN_PRESET, exportSillyTavernPreset, normalizeTavernPreset, type TavernPromptPreset } from "./preset-runtime.js";
-import { createTavernSessionSeed, currentOpeningSurfaceSeq, currentWorldbookSurfaceSeq, hasPlayerMessage, isolateTavernAssembly, tavernSurfaceAudit, tavernSurfaceEventDetail, TAVERN_WORLD_CONTEXT_MARKER, upsertTavernAssemblyContext, worldbookContextRevision, type TavernAssemblySummary } from "./session-runtime.js";
+import { createTavernSessionSeed, currentOpeningSurfaceSeq, currentOpeningText, currentWorldbookSurfaceSeq, hasPlayerMessage, isolateTavernAssembly, openingIdFromSetChatMessages, tavernSurfaceAudit, tavernSurfaceEventDetail, TAVERN_WORLD_CONTEXT_MARKER, upsertTavernAssemblyContext, worldbookContextRevision, type TavernAssemblySummary } from "./session-runtime.js";
 import { applyVariableUpdate, CommittedReplyVariableGate, initializeVariableRuntime, mergeVariableScopes, variableStateDigest, type VariableObject, type VariableRuntimeEvent, type VariableSource, type VariableUpdateResult } from "./variable-runtime.js";
-import { adaptOpeningFrontendHtml, applyFrontendStateAction, bridgeCapabilities, frontendStateDigest, groupFrontendMessagesForNativeFlow, initialFrontendState, projectFrontendMessages, type FrontendDefinition, type FrontendProjection } from "./frontend-runtime.js";
+import { adaptOpeningFrontendHtml, applyFrontendStateAction, bridgeCapabilities, frontendStateDigest, groupFrontendMessagesForNativeFlow, initialFrontendState, projectFrontendMessages, waitForCommittedFrontendTurn, type FrontendDefinition, type FrontendProjection } from "./frontend-runtime.js";
 import { createEjsRuntime } from "./ejs-runtime.js";
 import { applySplitMvuPatchCompatibility, hasSplitMvuContract, splitMvuActivationForPhase } from "./split-mvu.js";
 import { compatibilityCallCatalog, describeCompatibilityCall } from "./compatibility-call-runtime.js";
 import { defaultMvuSessionSettings, normalizeMvuSessionSettings, replayMvuReplies, resolveMvuExtraModel, supportsExtraModelParsing, type MvuSessionSettings } from "./mvu-session-control.js";
 import { personaBindingKey, personaBindingKeysToClearForSelection, renderPersonaPrompt, resolvePersona, validatePersonaDraft, type PersonaBindingRecord, type PersonaBindingScope, type PersonaRecord } from "./persona-runtime.js";
+import { applyTavernHelperGenerateInjections, generateScanText, normalizeTavernHelperGenerateConfig } from "./auxiliary-generation.js";
+import { hideCardFromLibrary, orderVisibleCards, preserveCardLibraryMetadata, reorderVisibleCards, restoreCardToLibrary, type CardLibraryRecord } from "./card-library.js";
 
 export const name = "dsh-re3-rp";
 export const inject = ["webServer", "sessions", "sessionPersistence", "storageDomain", "agents", "agentDefaultModel", "llm"];
@@ -399,7 +401,7 @@ export async function apply(ctx: any): Promise<() => Promise<void>> {
       (input) => new Uint8Array(zlib.inflateSync(input)),
     );
     if (reparsed.revisionId !== revisionId) throw new Error(`角色卡原件摘要不匹配：${revisionId}`);
-    await cards.put(revisionId, reparsed as unknown as RecordValue);
+    await cards.put(revisionId, preserveCardLibraryMetadata(reparsed as unknown as CardLibraryRecord, storedValue as CardLibraryRecord) as RecordValue);
   }
 
   const handles = new Map<string, any>();
@@ -415,6 +417,8 @@ export async function apply(ctx: any): Promise<() => Promise<void>> {
   }>();
   const variableReplyGate = new CommittedReplyVariableGate();
   const pendingBridgeOperations = new Map<string, Promise<RecordValue>>();
+  const pendingOpeningSelections = new Map<string, Promise<unknown>>();
+  const activeAuxiliaryGenerations = new Map<string, AbortController>();
   const compiledRequestReentryGuards = new WeakSet<object>();
   const splitMvuRequestGuards = new WeakSet<object>();
   const disposers: Array<() => void> = [];
@@ -525,6 +529,84 @@ export async function apply(ctx: any): Promise<() => Promise<void>> {
     return { binding, card, variables, session };
   };
 
+  const openingState = (binding: Binding, card: NormalizedCard, session: any): RecordValue => {
+    const currentIndex = Math.max(0, card.openings.findIndex((opening) => opening.id === binding.openingId));
+    return {
+      ok: true,
+      sessionId: binding.sessionId,
+      revisionId: binding.revisionId,
+      openingId: binding.openingId,
+      currentIndex,
+      currentMessage: substituteCardMacros(card.openings[currentIndex]?.message ?? "", { userName: effectiveUserName(binding), characterName: card.title }),
+      locked: hasPlayerMessage(session.events),
+      openings: card.openings.map((opening, index) => ({
+        id: opening.id,
+        index,
+        label: opening.label,
+        preview: opening.message.replace(/\s+/gu, " ").trim().slice(0, 120) || "（空白开场）",
+      })),
+    };
+  };
+
+  const openingIntentKey = (sessionId: string): string => `opening-intent:${sessionId}`;
+
+  const commitSessionOpening = async (sessionId: string, openingId: string): Promise<RecordValue> => {
+    const { binding, card, variables, session } = cardBridgeContext(sessionId);
+    if (hasPlayerMessage(session.events)) throw bridgeFailure("opening_locked", "第一句玩家消息已经发出，开场已锁定");
+    const opening = card.openings.find((candidate) => candidate.id === openingId);
+    if (opening === undefined) throw bridgeFailure("invalid_action", "找不到这个备选开场");
+    const renderedOpening = substituteCardMacros(opening.message, { userName: effectiveUserName(binding), characterName: card.title });
+    if (currentOpeningText(session) !== renderedOpening) replaceOpening(session, renderedOpening);
+    binding.openingId = opening.id;
+    binding.openingDigest = await sha256(new TextEncoder().encode(renderedOpening));
+    await selectOpeningVariables(variables, opening.id);
+    await bindings.put(sessionId, binding as unknown as RecordValue);
+    // Flush even if the live surface already matches: a prior attempt may have
+    // persisted binding/variables and then failed before Session persistence.
+    await ctx.sessions.flush(session);
+    return openingState(binding, card, session);
+  };
+
+  const putOpeningReceipt = async (sessionId: string, operationId: unknown, state: RecordValue): Promise<void> => {
+    if (typeof operationId !== "string") return;
+    await frontendReceipts.put(`${sessionId}:${operationId}`, {
+      ok: true,
+      committed: true,
+      operationId,
+      openingId: state.openingId,
+      currentIndex: state.currentIndex,
+    });
+  };
+
+  const performSessionOpeningSelection = async (sessionId: string, openingId: string, operationId?: string): Promise<RecordValue> => {
+    const { card, session } = cardBridgeContext(sessionId);
+    if (hasPlayerMessage(session.events)) throw bridgeFailure("opening_locked", "第一句玩家消息已经发出，开场已锁定");
+    if (!card.openings.some((opening) => opening.id === openingId)) throw bridgeFailure("invalid_action", "找不到这个备选开场");
+    const intentKey = openingIntentKey(sessionId);
+    await frontendReceipts.put(intentKey, { kind: "opening_selection_intent", sessionId, openingId, ...(operationId === undefined ? {} : { operationId }), createdAt: new Date().toISOString() });
+    try {
+      const state = await commitSessionOpening(sessionId, openingId);
+      await putOpeningReceipt(sessionId, operationId, state);
+      await frontendReceipts.delete(intentKey);
+      return state;
+    } catch (error) {
+      const code = (error as BridgeFailure).code;
+      if (code === "opening_locked" || code === "invalid_action") await frontendReceipts.delete(intentKey);
+      throw error;
+    }
+  };
+
+  const selectSessionOpening = async (sessionId: string, openingId: string, operationId?: string): Promise<RecordValue> => {
+    const previous = pendingOpeningSelections.get(sessionId) ?? Promise.resolve();
+    const operation = previous.catch(() => undefined).then(() => performSessionOpeningSelection(sessionId, openingId, operationId));
+    pendingOpeningSelections.set(sessionId, operation);
+    try {
+      return await operation;
+    } finally {
+      if (pendingOpeningSelections.get(sessionId) === operation) pendingOpeningSelections.delete(sessionId);
+    }
+  };
+
   const compatibilityCallSequences = new Map<string, number>();
   const appendCompatibilityCall = async (sessionId: string, operationIdValue: unknown, payload: RecordValue): Promise<RecordValue> => {
     const { binding } = cardBridgeContext(sessionId);
@@ -568,7 +650,175 @@ export async function apply(ctx: any): Promise<() => Promise<void>> {
     return value;
   };
 
+  const generateAuxiliaryText = async (sessionId: string, operationIdValue: unknown, payload: RecordValue, requestSignal?: AbortSignal): Promise<RecordValue> => {
+    const { binding, card, variables, session } = cardBridgeContext(sessionId);
+    const operationId = requireOperationId(operationIdValue);
+    const config = normalizeTavernHelperGenerateConfig(payload);
+    const traceId = `tavern-helper-generate:${sessionId}:${operationId}`;
+    const capturedAt = new Date().toISOString();
+    const preset = bindingPreset(binding);
+    const baseTrace: RecordValue = {
+      traceId,
+      kind: "tavern-helper-generation",
+      operationId,
+      sessionId,
+      revisionId: binding.revisionId,
+      capturedAt,
+      provider: binding.provider,
+      model: binding.model,
+      presetId: preset.id,
+      presetRevision: preset.revision,
+      requestedStreaming: config.shouldStream,
+      injectionCount: config.injects.length,
+      injectionRoles: config.injects.map((item) => item.role),
+      injectionLengths: config.injects.map((item) => item.content.length),
+      status: "running",
+    };
+    await traces.put(traceId, baseTrace);
+    const abortController = new AbortController();
+    const activeKey = `${sessionId}:${operationId}`;
+    if (activeAuxiliaryGenerations.has(activeKey)) throw bridgeFailure("invalid_action", "同一 operationId 的辅助生成仍在运行");
+    activeAuxiliaryGenerations.set(activeKey, abortController);
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; abortController.abort(); }, config.timeoutMs);
+    const abortFromRequest = (): void => abortController.abort();
+    if (requestSignal?.aborted) abortController.abort();
+    else requestSignal?.addEventListener("abort", abortFromRequest, { once: true });
+    try {
+      const chat = normalizeTavernChatMessages(typeof session.deriveMessages === "function" ? session.deriveMessages() : []);
+      const currentPersona = activePersona(binding)?.persona;
+      const currentUserName = currentPersona?.displayName ?? binding.userName;
+      const personaDescription = currentPersona?.content ?? "";
+      const ejsVariables = variables.state ?? {};
+      const messageId = Math.max(-1, chat.length - 1);
+      const ejsDiagnostics: Array<{ source: "card" | "worldbook"; id: string; code: string; message: string }> = [];
+      let ejsSourceCount = 0;
+      let ejsInputBytes = 0;
+      let ejsOutputBytes = 0;
+      const encoder = new TextEncoder();
+      const renderEjsSource = async (source: string, sourceType: "card" | "worldbook", id: string): Promise<string | undefined> => {
+        if (!/<%|%>/u.test(source)) return source;
+        const sourceBytes = encoder.encode(source).byteLength;
+        if (ejsSourceCount >= 128 || ejsInputBytes + sourceBytes > 2 * 1024 * 1024) {
+          ejsDiagnostics.push({ source: sourceType, id, code: "ejs_round_limit", message: "辅助生成 EJS 输入超过安全边界" });
+          return undefined;
+        }
+        ejsSourceCount += 1;
+        ejsInputBytes += sourceBytes;
+        try {
+          const missingVariables: string[] = [];
+          const rendered = (await ejsRuntime.render([source], ejsVariables, {
+            messageId,
+            seed: `${card.revisionId}:${sessionId}:${operationId}:${sourceType}:${id}`,
+            missingVariables,
+          }))[0]!;
+          const outputBytes = encoder.encode(rendered).byteLength;
+          if (ejsOutputBytes + outputBytes > 4 * 1024 * 1024) {
+            ejsDiagnostics.push({ source: sourceType, id, code: "ejs_round_limit", message: "辅助生成 EJS 输出超过安全边界" });
+            return undefined;
+          }
+          ejsOutputBytes += outputBytes;
+          if (missingVariables.length > 0) ejsDiagnostics.push({ source: sourceType, id, code: "ejs_variable_unavailable", message: `缺少变量：${[...new Set(missingVariables)].join("、")}` });
+          return rendered;
+        } catch (error) {
+          ejsDiagnostics.push({ source: sourceType, id, code: typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : "ejs_render_failed", message: error instanceof Error ? error.message : String(error) });
+          return undefined;
+        }
+      };
+      const renderedCard = { ...card };
+      for (const key of ["description", "personality", "scenario", "messageExample", "systemPrompt", "postHistoryInstructions"] as const) {
+        const rendered = await renderEjsSource(card[key], "card", key);
+        if (rendered === undefined) throw Object.assign(new Error(`辅助生成的 EJS 顶层角色字段 ${key} 渲染失败`), { code: "ejs_render_failed" });
+        renderedCard[key] = rendered;
+      }
+      const executableWorldbook = card.worldbook.map((entry) => binding.worldbookEnabledOverrides?.[entry.id] === undefined ? entry : { ...entry, enabled: binding.worldbookEnabledOverrides[entry.id] === true });
+      const resolved = await activateWorldbookWithRenderer(
+        executableWorldbook,
+        generateScanText(chat, config),
+        sessionId,
+        { messageCount: chat.length, runtimeState: binding.worldbookState, maxRecursionSteps: binding.worldInfoMaxRecursionSteps },
+        (entry) => /<%|%>/u.test(entry.content),
+        async (entry) => renderEjsSource(entry.content, "worldbook", entry.id),
+      );
+      let compiled = compileTavernPrompt({ card: renderedCard, userName: currentUserName, personaDescription, chat, activation: resolved.activation, messageVariables: variables.state, macroSeed: `${sessionId}:${operationId}`, preset });
+      compiled = applyTavernHelperGenerateInjections(compiled, config);
+      const visibleText = compiled.messages.map((message) => message.content).join("\n");
+      if (/<%|%>/u.test(visibleText)) throw Object.assign(new Error("辅助生成请求仍含未解析 EJS，已阻止发送"), { code: "ejs_unresolved" });
+      binding.worldbookState = resolved.activation.runtimeState;
+      await bindings.put(sessionId, binding as unknown as RecordValue);
+      const options: any = { provider: binding.provider, model: binding.model, system: "", messages: [], tools: [], sessionId, purpose: "tavern-helper-generate", signal: abortController.signal };
+      applyCompiledPromptToRequest(options, compiled);
+      const requestText = JSON.stringify({ system: options.system, messages: options.messages });
+      let body = "";
+      let providerFailure = "";
+      for await (const chunk of ctx.llm.stream(options)) {
+        if (chunk?.type === "text-delta" && typeof chunk.text === "string") body += chunk.text;
+        if (body.length > 4 * 1024 * 1024) throw Object.assign(new Error("辅助生成结果超过 4 MiB"), { code: "provider_error" });
+        if (chunk?.type === "finish" && (chunk.reason?.kind === "error" || chunk.reason?.kind === "aborted")) providerFailure = typeof chunk.reason.failure?.message === "string" ? chunk.reason.failure.message : `辅助生成${chunk.reason.kind}`;
+      }
+      if (providerFailure.length > 0) throw Object.assign(new Error(providerFailure), { code: abortController.signal.aborted ? "generation_cancelled" : "provider_error" });
+      if (abortController.signal.aborted) throw Object.assign(new Error(timedOut ? "辅助生成超时" : "辅助生成已取消"), { code: timedOut ? "generation_timeout" : "generation_cancelled" });
+      await traces.put(traceId, {
+        ...baseTrace,
+        status: "completed",
+        completedAt: new Date().toISOString(),
+        requestDigest: await sha256(encoder.encode(requestText)),
+        messageRoles: (options.messages ?? []).map((message: any) => message.role),
+        messageLengths: (options.messages ?? []).map((message: any) => messageText(message).length),
+        responseDigest: await sha256(encoder.encode(body)),
+        responseLength: body.length,
+        ejsDiagnostics,
+      });
+      return { text: body, operationId, traceId, status: "completed", streamed: false };
+    } catch (error) {
+      const requestedCode = typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : "provider_error";
+      const code = timedOut ? "generation_timeout" : abortController.signal.aborted && requestedCode === "provider_error" ? "generation_cancelled" : requestedCode;
+      const message = error instanceof Error ? error.message : String(error);
+      await traces.put(traceId, { ...baseTrace, status: code === "generation_timeout" ? "timeout" : code === "generation_cancelled" ? "cancelled" : "failed", completedAt: new Date().toISOString(), error: { code, message } });
+      throw bridgeFailure(code, message);
+    } finally {
+      clearTimeout(timer);
+      activeAuxiliaryGenerations.delete(activeKey);
+      requestSignal?.removeEventListener("abort", abortFromRequest);
+    }
+  };
+
+  const cancelAuxiliaryGeneration = (sessionId: string, operationIdValue: unknown): RecordValue => {
+    cardBridgeContext(sessionId);
+    const operationId = requireOperationId(operationIdValue);
+    const controller = activeAuxiliaryGenerations.get(`${sessionId}:${operationId}`);
+    if (controller === undefined) return { operationId, cancelled: false, status: "not_running" };
+    controller.abort();
+    return { operationId, cancelled: true, status: "cancelling" };
+  };
+
+  const missingRuntimeCriticalApis = (card: NormalizedCard): string[] => (card.requiredCriticalTavernHelperApis ?? []).filter((api) => {
+    const match = /^TavernHelper\.(.+)$/u.exec(api);
+    if (match === null || describeCompatibilityCall("TavernHelper", match[1]!) === undefined) return true;
+    return match[1] === "generate" && typeof generateAuxiliaryText !== "function";
+  });
+
   const storedReceipt = (sessionId: string, operationId: string): RecordValue | undefined => frontendReceipts.get(`${sessionId}:${operationId}`) as RecordValue | undefined;
+
+  const selectOpeningFromChatMessages = async (sessionId: string, operationIdValue: unknown, payload: RecordValue): Promise<RecordValue> => {
+    const operationId = requireOperationId(operationIdValue);
+    const key = `${sessionId}:${operationId}`;
+    const prior = storedReceipt(sessionId, operationId);
+    if (prior !== undefined) return { ...prior, duplicate: true };
+    const active = pendingBridgeOperations.get(key);
+    if (active !== undefined) return active;
+    const operation = (async (): Promise<RecordValue> => {
+      const { card } = cardBridgeContext(sessionId);
+      const openingId = openingIdFromSetChatMessages(payload.messages, card.openings);
+      if (openingId === undefined) throw bridgeFailure("invalid_action", "setChatMessages 只允许切换首条 assistant 消息的现有开场 swipe");
+      const state = await selectSessionOpening(sessionId, openingId, operationId);
+      const receipt = storedReceipt(sessionId, operationId);
+      if (receipt === undefined) throw bridgeFailure("state_commit_failed", "开场状态已提交但 operation receipt 缺失");
+      return { ...receipt, state };
+    })().finally(() => pendingBridgeOperations.delete(key));
+    pendingBridgeOperations.set(key, operation);
+    return operation;
+  };
 
   const submitFrontendTurn = async (sessionId: string, operationIdValue: unknown, payload: RecordValue): Promise<RecordValue> => {
     const operationId = requireOperationId(operationIdValue);
@@ -587,13 +837,15 @@ export async function apply(ctx: any): Promise<() => Promise<void>> {
       const before = projectFrontendMessages(session, card.messageRegexScripts, projectionMacros);
       agent.followup({ id: crypto.randomUUID(), role: "user", content: [{ type: "text", text }], source: { kind: "user" } });
       await agent.whenIdle();
-      await ctx.sessions.flush(session);
-      const after = projectFrontendMessages(session, card.messageRegexScripts, projectionMacros);
-      const committedUser = after.find((message) => message.seq > (before.at(-1)?.seq ?? -1) && message.role === "user" && message.text === text);
-      const committedAssistant = after.find((message) => message.seq > (committedUser?.seq ?? Number.MAX_SAFE_INTEGER) && message.role === "assistant");
-      if (committedUser === undefined || committedAssistant === undefined) throw bridgeFailure("state_commit_failed", "Host 没有提交完整的正式玩家消息与模型回复");
-      const event = await appendFrontendEvent(record, "generation_committed", operationId, { committedUserSeq: committedUser.seq, committedSeq: committedAssistant.seq });
-      const receipt = { ok: true, committed: true, operationId, committedSeq: committedAssistant.seq, eventSequence: event.sequence };
+      const committed = await waitForCommittedFrontendTurn({
+        afterSeq: before.at(-1)?.seq ?? -1,
+        userText: text,
+        flush: () => ctx.sessions.flush(session),
+        readMessages: () => projectFrontendMessages(session, card.messageRegexScripts, projectionMacros),
+      });
+      if (committed === undefined) throw bridgeFailure("state_commit_failed", "Host 没有提交完整的正式玩家消息与模型回复");
+      const event = await appendFrontendEvent(record, "generation_committed", operationId, { committedUserSeq: committed.user.seq, committedSeq: committed.assistant.seq });
+      const receipt = { ok: true, committed: true, operationId, committedSeq: committed.assistant.seq, eventSequence: event.sequence };
       await frontendReceipts.put(key, receipt);
       return { ...receipt, projection: frontendProjection(sessionId) };
     })().finally(() => pendingBridgeOperations.delete(key));
@@ -618,12 +870,14 @@ export async function apply(ctx: any): Promise<() => Promise<void>> {
       const before = projectFrontendMessages(session, card.messageRegexScripts, macros);
       agent.followup({ id: crypto.randomUUID(), role: "user", content: [{ type: "text", text }], source: { kind: "user" } });
       await agent.whenIdle();
-      await ctx.sessions.flush(session);
-      const after = projectFrontendMessages(session, card.messageRegexScripts, macros);
-      const committedUser = after.find((message) => message.seq > (before.at(-1)?.seq ?? -1) && message.role === "user" && message.text === text);
-      const committedAssistant = after.find((message) => message.seq > (committedUser?.seq ?? Number.MAX_SAFE_INTEGER) && message.role === "assistant");
-      if (committedUser === undefined || committedAssistant === undefined) throw bridgeFailure("state_commit_failed", "Host 没有提交完整的正式玩家消息与模型回复");
-      const receipt = { ok: true, committed: true, operationId, committedUserSeq: committedUser.seq, committedSeq: committedAssistant.seq };
+      const committed = await waitForCommittedFrontendTurn({
+        afterSeq: before.at(-1)?.seq ?? -1,
+        userText: text,
+        flush: () => ctx.sessions.flush(session),
+        readMessages: () => projectFrontendMessages(session, card.messageRegexScripts, macros),
+      });
+      if (committed === undefined) throw bridgeFailure("state_commit_failed", "Host 没有提交完整的正式玩家消息与模型回复");
+      const receipt = { ok: true, committed: true, operationId, committedUserSeq: committed.user.seq, committedSeq: committed.assistant.seq };
       await frontendReceipts.put(key, receipt);
       return receipt;
     })().finally(() => pendingBridgeOperations.delete(key));
@@ -1268,7 +1522,45 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
     handles.set(binding.sessionId, handle);
   };
 
-  for (const binding of allBindings()) await restore(binding);
+  const reconcileOpeningIntent = async (binding: Binding): Promise<void> => {
+    const intentKey = openingIntentKey(binding.sessionId);
+    const intent = frontendReceipts.get(intentKey) as RecordValue | undefined;
+    if (intent?.kind !== "opening_selection_intent" || intent.sessionId !== binding.sessionId || typeof intent.openingId !== "string") return;
+    const session = ctx.sessions.get(binding.sessionId);
+    if (session !== undefined && hasPlayerMessage(session.events)) {
+      const card = cardFor(binding.revisionId);
+      const variables = variableStates.get(binding.sessionId) as unknown as VariableStateRecord | undefined;
+      const opening = card?.openings.find((candidate) => candidate.id === intent.openingId);
+      if (card === undefined || variables === undefined || opening === undefined) return;
+      const renderedOpening = substituteCardMacros(opening.message, { userName: effectiveUserName(binding), characterName: card.title });
+      const initial = variables.initialSnapshots[opening.id];
+      if (initial === undefined || initial.status !== "initialized") throw new Error("恢复开场没有可用的初始变量快照");
+      const replay = replayMvuReplies(initial.state, assistantVariableReplies(session));
+      if (replay.failedReplies > 0) throw new Error(`恢复开场时有 ${replay.failedReplies} 条回复未通过原子校验，原状态未改动`);
+      const nextVariables = structuredClone(variables);
+      nextVariables.selectedOpeningId = opening.id;
+      nextVariables.state = replay.state;
+      nextVariables.digest = await variableStateDigest(replay.state);
+      nextVariables.updatedAt = new Date().toISOString();
+      if (currentOpeningText(session) !== renderedOpening) replaceOpening(session, renderedOpening);
+      await variableStates.put(binding.sessionId, nextVariables as unknown as RecordValue);
+      binding.openingId = opening.id;
+      binding.openingDigest = await sha256(new TextEncoder().encode(renderedOpening));
+      await bindings.put(binding.sessionId, binding as unknown as RecordValue);
+      await ctx.sessions.flush(session);
+      await putOpeningReceipt(binding.sessionId, intent.operationId, openingState(binding, card, session));
+      await frontendReceipts.delete(intentKey);
+      return;
+    }
+    const state = await commitSessionOpening(binding.sessionId, intent.openingId);
+    await putOpeningReceipt(binding.sessionId, intent.operationId, state);
+    await frontendReceipts.delete(intentKey);
+  };
+
+  for (const binding of allBindings()) {
+    await restore(binding);
+    await reconcileOpeningIntent(binding);
+  }
 
   disposers.push(ctx.on("llm/stream", (options: any, next: () => AsyncIterable<any>) => {
     if (splitMvuRequestGuards.has(options)) return next();
@@ -1290,7 +1582,23 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
     const requestText = JSON.stringify({ system: options.system ?? "", messages: options.messages ?? [] });
     const modelVisibleText = `${options.system ?? ""}\n${(options.messages ?? []).map(messageText).join("\n")}`;
     if (/<%|%>/u.test(modelVisibleText)) throw Object.assign(new Error("实际模型请求仍含 EJS 源码，已阻止发送"), { code: "ejs_unresolved" });
-    const stream = next();
+    const providerStream = (): AsyncIterable<any> => {
+      const stream = next();
+      return stream;
+    };
+    const stream = hostGlobal.process.env.DSH_RE3_RP_VERIFY === "1"
+      ? (async function* (): AsyncIterable<any> {
+          const text = card.frontendDefinition?.caseId === "opening-inline-action"
+            ? "警铃穿过潮雾。<MixedWatchPanel phase=\"turn-1\"/>守望员登记了这次正式行动。"
+            : card.frontendDefinition?.caseId === "generated-multi-fragment"
+              ? "潮汐哨兵回报：<HarborSignal>白砾号已确认</HarborSignal>，随后更新值守板。<TideStatusPanel phase=\"turn-1\"/>潮位记录已归档。"
+              : "固定验收回复：正式玩家行动已经进入 DSH Session。";
+          yield { type: "block-start", index: 0, blockType: "text" };
+          yield { type: "text-delta", index: 0, text };
+          yield { type: "block-end", index: 0, block: { type: "text", text } };
+          yield { type: "finish", reason: { kind: "stop" } };
+        })()
+      : providerStream();
     return (async function* (): AsyncIterable<any> {
       {
         const worldbookSnapshotCount = (options.messages ?? []).filter((message: any) => messageText(message).startsWith(TAVERN_WORLD_CONTEXT_MARKER)).length;
@@ -1379,10 +1687,35 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
   }, { global: true }));
 
   disposers.push(ctx.webServer.register({ kind: "exact", path: "/dsh-re3-rp/cards", handler: async (req: any, res: any) => {
-    if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405, { Allow: "GET, HEAD" }); res.end(); return; }
-    const value = { cards: Array.from(cards.entries(), ([, card]: [string, RecordValue]) => publicCard(card as unknown as NormalizedCard, allBindings(), (sessionId) => ctx.sessions.get(sessionId))) };
-    if (req.method === "HEAD") { res.writeHead(200, { "Cache-Control": "no-store" }); res.end(); return; }
-    jsonBody(res, 200, value);
+    const cardRecords = (): CardLibraryRecord[] => Array.from(cards.entries(), ([, card]: [string, RecordValue]) => card as CardLibraryRecord);
+    const value = (): RecordValue => ({ cards: orderVisibleCards(cardRecords()).map((card) => publicCard(card as unknown as NormalizedCard, allBindings(), (sessionId) => ctx.sessions.get(sessionId))) });
+    if (req.method === "GET" || req.method === "HEAD") {
+      if (req.method === "HEAD") { res.writeHead(200, { "Cache-Control": "no-store" }); res.end(); return; }
+      jsonBody(res, 200, value());
+      return;
+    }
+    try {
+      if (req.method === "PATCH") {
+        const input = await readJson(req);
+        const revisionIds = Array.isArray(input.revisionIds) ? input.revisionIds.filter((item): item is string => typeof item === "string") : [];
+        const reordered = reorderVisibleCards(cardRecords(), revisionIds);
+        for (const card of reordered) await cards.put(card.revisionId, card as RecordValue);
+        jsonBody(res, 200, { ok: true, ...value() });
+        return;
+      }
+      if (req.method === "DELETE") {
+        const input = await readJson(req);
+        const revisionId = typeof input.revisionId === "string" ? input.revisionId : "";
+        const card = cards.get(revisionId) as CardLibraryRecord | undefined;
+        if (card === undefined || card.libraryHidden === true) throw new Error("找不到要从卡库删除的酒馆卡");
+        await cards.put(revisionId, hideCardFromLibrary(card) as RecordValue);
+        jsonBody(res, 200, { ok: true, preservedSessions: allBindings().filter((binding) => binding.revisionId === revisionId).length, ...value() });
+        return;
+      }
+      res.writeHead(405, { Allow: "GET, HEAD, PATCH, DELETE" }); res.end();
+    } catch (error) {
+      jsonBody(res, 400, { ok: false, error: error instanceof Error ? error.message : "酒馆卡库操作失败" });
+    }
   }}));
 
   disposers.push(ctx.webServer.register({ kind: "exact", path: "/dsh-re3-rp/import", handler: async (req: any, res: any) => {
@@ -1400,8 +1733,9 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
         fs.writeFileSync(temporary, bytes, { flag: "wx" });
         try { fs.renameSync(temporary, blobPath); } finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
       }
-      if (storedCard?.normalizedIndexVersion !== NORMALIZED_CARD_INDEX_VERSION) await cards.put(card.revisionId, card as unknown as RecordValue);
-      jsonBody(res, 201, { ok: true, card: publicCard(card, allBindings()) });
+      const restored = restoreCardToLibrary(card as unknown as CardLibraryRecord, storedCard as unknown as CardLibraryRecord | undefined);
+      await cards.put(card.revisionId, restored as RecordValue);
+      jsonBody(res, 201, { ok: true, card: publicCard(restored as unknown as NormalizedCard, allBindings()) });
     } catch (error) {
       jsonBody(res, 400, { ok: false, error: error instanceof Error ? error.message : "无法导入角色卡" });
     }
@@ -1493,25 +1827,6 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
     }
   }}));
 
-  const openingState = (binding: Binding, card: NormalizedCard, session: any): RecordValue => {
-    const currentIndex = Math.max(0, card.openings.findIndex((opening) => opening.id === binding.openingId));
-    return {
-      ok: true,
-      sessionId: binding.sessionId,
-      revisionId: binding.revisionId,
-      openingId: binding.openingId,
-      currentIndex,
-      currentMessage: substituteCardMacros(card.openings[currentIndex]?.message ?? "", { userName: effectiveUserName(binding), characterName: card.title }),
-      locked: hasPlayerMessage(session.events),
-      openings: card.openings.map((opening, index) => ({
-        id: opening.id,
-        index,
-        label: opening.label,
-        preview: opening.message.replace(/\s+/gu, " ").trim().slice(0, 120) || "（空白开场）",
-      })),
-    };
-  };
-
   disposers.push(ctx.webServer.register({ kind: "exact", path: "/dsh-re3-rp/opening", handler: async (req: any, res: any) => {
     if (req.method !== "GET" && req.method !== "POST") { res.writeHead(405, { Allow: "GET, POST" }); res.end(); return; }
     try {
@@ -1528,25 +1843,11 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
         jsonBody(res, 404, { ok: false, error: "这不是可切换开场的酒馆会话" }); return;
       }
       if (req.method === "GET") { jsonBody(res, 200, openingState(binding, card, session)); return; }
-      if (hasPlayerMessage(session.events)) { jsonBody(res, 409, { ...openingState(binding, card, session), ok: false, error: "第一句玩家消息已经发出，开场已锁定" }); return; }
       const openingId = typeof input.openingId === "string" ? input.openingId : "";
-      const opening = card.openings.find((candidate) => candidate.id === openingId);
-      if (opening === undefined) throw new Error("找不到这个备选开场");
-      if (opening.id !== binding.openingId) {
-        const renderedOpening = substituteCardMacros(opening.message, { userName: effectiveUserName(binding), characterName: card.title });
-        replaceOpening(session, renderedOpening);
-        binding.openingId = opening.id;
-        binding.openingDigest = await sha256(new TextEncoder().encode(renderedOpening));
-        const variableState = variableStates.get(sessionId) as unknown as VariableStateRecord | undefined;
-        if (variableState !== undefined) await selectOpeningVariables(variableState, opening.id);
-        await bindings.put(sessionId, binding as unknown as RecordValue);
-        await ctx.sessions.flush(session);
-        jsonBody(res, 200, openingState(binding, card, session));
-        return;
-      }
-      jsonBody(res, 200, openingState(binding, card, session));
+      jsonBody(res, 200, await selectSessionOpening(sessionId, openingId));
     } catch (error) {
-      jsonBody(res, 400, { ok: false, error: error instanceof Error ? error.message : "无法切换开场" });
+      const failure = error as BridgeFailure;
+      jsonBody(res, failure.code === "opening_locked" ? 409 : failure.code === "bridge_unavailable" ? 404 : 400, { ok: false, error: failure.message ?? "无法切换开场" });
     }
   }}));
 
@@ -1695,6 +1996,8 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
       const opening = card?.openings.find((candidate) => candidate.id === openingId);
       if (card === undefined || opening === undefined || userName.length === 0) throw new Error("缺少卡片 revision、开场选择或玩家名字");
       if (card.playability === "blocked") throw new Error(card.statusDetail);
+      const runtimeMissing = missingRuntimeCriticalApis(card);
+      if (runtimeMissing.length > 0) throw new Error(`当前 Host 运行时缺少卡内启动关键接口：${runtimeMissing.join("、")}`);
       sessionId = crypto.randomUUID();
       const selection = ctx.agentDefaultModel.currentSelection();
       const inheritedPersona = resolvedPersona({ revisionId })?.persona;
@@ -2008,11 +2311,14 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
       const operationId = input.operationId ?? payload.operationId;
       let result: unknown;
       if (method === "reportCompatibilityCall") result = await appendCompatibilityCall(sessionId, operationId, payload);
+      else if (method === "generate") result = await generateAuxiliaryText(sessionId, operationId, payload);
+      else if (method === "cancelGenerate") result = cancelAuxiliaryGeneration(sessionId, operationId);
       else if (method === "getCardState") result = cardStateProjection(sessionId);
       else if (method === "replaceCardState") result = await replaceCardState(sessionId, operationId, payload);
       else if (method === "replaceCardStorage") result = await replaceCardStorage(sessionId, payload);
       else if (method === "getWorldbook") result = compatibleWorldbook(sessionId);
       else if (method === "updateWorldbook") result = await updateCardWorldbook(sessionId, operationId, payload);
+      else if (method === "selectOpening") result = await selectOpeningFromChatMessages(sessionId, operationId, payload);
       else if (method === "submitTurn") {
         const binding = bindings.get(sessionId) as unknown as Binding | undefined;
         const card = binding === undefined ? undefined : cardFor(binding.revisionId);
@@ -2032,7 +2338,7 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
     } catch (error) {
       const failure = error as BridgeFailure;
       const code = failure.code ?? "bridge_unavailable";
-      const status = code === "capability_denied" ? 403 : code === "invalid_action" ? 400 : code === "asset_unavailable" ? 404 : code === "asset_digest_mismatch" || code === "state_commit_failed" ? 409 : 500;
+      const status = code === "capability_denied" ? 403 : code === "invalid_action" ? 400 : code === "asset_unavailable" ? 404 : code === "opening_locked" || code === "asset_digest_mismatch" || code === "state_commit_failed" ? 409 : 500;
       jsonBody(res, status, { ok: false, error: { code, message: failure.message ?? "Bridge 调用失败" } });
     }
   }}));
@@ -2176,14 +2482,15 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
 
     disposers.push(ctx.webServer.register({ kind: "exact", path: "/dsh-re3-rp/verify/fork", handler: async (req: any, res: any) => {
       if (req.method !== "POST") { res.writeHead(405, { Allow: "POST" }); res.end(); return; }
+      let childSessionId = "";
+      let childHandle: any;
       try {
         const input = await readJson(req);
         const sourceSessionId = typeof input.sessionId === "string" ? input.sessionId : "";
         const sourceBinding = bindings.get(sourceSessionId) as unknown as Binding | undefined;
         const source = ctx.sessions.get(sourceSessionId);
         if (sourceBinding === undefined || source === undefined) throw new Error("找不到可 Fork 的酒馆 Session");
-        const childSessionId = crypto.randomUUID();
-        const child = ctx.sessions.fork(source, undefined, childSessionId);
+        childSessionId = crypto.randomUUID();
         const childBinding: Binding = { ...sourceBinding, sessionId: childSessionId, createdAt: new Date().toISOString() };
         await bindings.put(childSessionId, childBinding as unknown as RecordValue);
         const sourcePersonaBinding = personaBindings.get(personaBindingKey("session", sourceSessionId)) as unknown as PersonaBindingRecord | undefined;
@@ -2201,6 +2508,15 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
           const childFrontend = JSON.parse(JSON.stringify({ ...sourceFrontend, sessionId: childSessionId, updatedAt: new Date().toISOString() })) as FrontendStateRecord;
           await frontendStates.put(childSessionId, childFrontend as unknown as RecordValue);
         }
+        childHandle = await ctx.agents.create({
+          sessionId: childSessionId,
+          seed: Array.from(source.events),
+          meta: { cwd: hostGlobal.process.cwd(), parentSession: sourceSessionId, seedLength: source.events.length },
+          agentOptions: { provider: childBinding.provider, model: childBinding.model },
+          setup: setupAgent(childSessionId, cardFor(childBinding.revisionId)!, childBinding),
+        });
+        handles.set(childSessionId, childHandle);
+        const child = childHandle.agent.session;
         await ctx.sessions.flush(child);
         jsonBody(res, 201, {
           ok: true,
@@ -2214,6 +2530,15 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
           childFrontendDigest: (frontendStates.get(childSessionId) as unknown as FrontendStateRecord | undefined)?.stateDigest ?? null,
         });
       } catch (error) {
+        if (childSessionId.length > 0) {
+          if (childHandle !== undefined) await childHandle.dispose();
+          handles.delete(childSessionId);
+          await bindings.delete(childSessionId);
+          await personaBindings.delete(personaBindingKey("session", childSessionId));
+          variableReplyGate.discard(childSessionId);
+          await variableStates.delete(childSessionId);
+          await frontendStates.delete(childSessionId);
+        }
         jsonBody(res, 400, { ok: false, error: error instanceof Error ? error.message : "DSH Fork 验证失败" });
       }
     }}));

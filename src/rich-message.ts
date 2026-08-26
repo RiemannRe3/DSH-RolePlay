@@ -5,6 +5,7 @@ export type RichFrameContentMetrics = {
   bodyOffsetHeight: number;
   bodyRectTop: number;
   bodyRectBottom: number;
+  nestedScrollableOverflowHeight?: number;
 };
 
 export type SillyTavernCompatibilityContext = {
@@ -21,6 +22,58 @@ const rawHtmlDocument = /^\s*<(?:!doctype|html|body|style|div|section|details)\b
 const htmlFragment = /^\s*<(?:!doctype|[a-z][\w:-]*)(?:\s|>)[\s\S]*>\s*$/iu;
 const fencedHtml = /```html\s*\r?\n([\s\S]*?)\r?\n```/giu;
 const fencedUntypedHtmlDocument = /```[ \t]*\r?\n(\s*<(?:!doctype|html)\b[\s\S]*?)\r?\n```/giu;
+const htmlTag = /<!--[\s\S]*?-->|<![^>]*>|<\/?([a-z][\w:-]*)\b(?:\s+(?:"[^"]*"|'[^']*'|[^'"<>])*)?\s*\/?>/giu;
+const rawTextElement = /<(script|style|template)\b(?:\s+(?:"[^"]*"|'[^']*'|[^'"<>])*)?\s*>[\s\S]*?<\/\1\s*>/giu;
+const voidHtmlTags = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
+const crossBoundaryContainerTags = new Set(["article", "aside", "body", "details", "dialog", "div", "fieldset", "footer", "form", "header", "html", "main", "nav", "ol", "section", "table", "tbody", "tfoot", "thead", "ul"]);
+
+function leavesOpenHtmlContainer(value: string): boolean {
+  const stack: string[] = [];
+  const structuralHtml = value.replace(rawTextElement, "");
+  for (const match of structuralHtml.matchAll(new RegExp(htmlTag.source, htmlTag.flags))) {
+    const token = match[0];
+    const tag = match[1]?.toLowerCase();
+    if (tag === undefined || token.startsWith("<!--") || token.startsWith("<!")) continue;
+    if (token.startsWith("</")) {
+      const matchingIndex = stack.lastIndexOf(tag);
+      if (matchingIndex >= 0) stack.splice(matchingIndex);
+      continue;
+    }
+    if (token.endsWith("/>") || voidHtmlTags.has(tag)) continue;
+    stack.push(tag);
+  }
+  return stack.some((tag) => crossBoundaryContainerTags.has(tag) || tag.includes("-"));
+}
+
+function escapeCrossBoundaryProse(value: string): string {
+  // `<content>` is a common card control wrapper, not player prose. In the
+  // original shared message DOM the browser consumes it as markup; do the same
+  // without allowing arbitrary prose HTML to become executable in the iframe.
+  const visible = value
+    .replace(/(?:^|\r?\n)[ \t]*<\/?content\b[^>]*>[ \t]*(?=\r?\n|$)/giu, "\n")
+    .trim();
+  if (visible.length === 0) return "";
+  const escaped = visible
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+  return `<div data-dsh-cross-boundary-prose style="white-space: pre-wrap">${escaped}</div>`;
+}
+
+function stitchCrossBoundaryWrapper(blocks: readonly RichBlock[]): RichBlock[] {
+  const openingIndex = blocks.findIndex((block, index) => block.kind === "html"
+    && index < blocks.length - 1
+    && leavesOpenHtmlContainer(block.content));
+  if (openingIndex < 0) return [...blocks];
+
+  const content = blocks.slice(openingIndex)
+    .map((block) => block.kind === "html" ? block.content : escapeCrossBoundaryProse(block.content))
+    .filter((value) => value.length > 0)
+    .join("\n");
+  return [...blocks.slice(0, openingIndex), { kind: "html", content }];
+}
 
 // Message iframes are expanded by the Host, so their previous viewport height
 // must never participate in the next measurement. In particular,
@@ -34,7 +87,12 @@ export function measureRichFrameContentHeight(metrics: RichFrameContentMetrics):
     finite(metrics.bodyOffsetHeight),
     finite(metrics.bodyRectBottom) - bodyTop,
   );
-  return Math.max(72, Math.ceil(bodyBottom));
+  // A viewport-relative card can keep body at exactly the current iframe
+  // height while moving the rest of its UI into overflow:auto descendants.
+  // Add that clipped extent so repeated resize receipts grow the viewport
+  // until the outer DSH conversation owns the vertical scroll surface.
+  const nestedOverflow = Math.max(0, finite(metrics.nestedScrollableOverflowHeight ?? 0));
+  return Math.max(72, Math.ceil(bodyBottom + nestedOverflow));
 }
 
 // Real cards can legitimately be many screens tall, so the Host owns one
@@ -57,6 +115,20 @@ export function buildSillyTavernCompatibilityContext(messageCount: number, curre
     chatId: safeMessageId,
     extensionSettings: { EjsTemplate: { enabled: true } },
   };
+}
+
+export function alignProjectedRoles(
+  flowRoles: readonly ("user" | "assistant")[],
+  projectedRoles: readonly ("user" | "assistant")[],
+): Array<number | null> | null {
+  const aligned = Array.from({ length: flowRoles.length }, () => null as number | null);
+  let projectedIndex = 0;
+  for (let flowIndex = 0; flowIndex < flowRoles.length && projectedIndex < projectedRoles.length; flowIndex += 1) {
+    if (flowRoles[flowIndex] !== projectedRoles[projectedIndex]) continue;
+    aligned[flowIndex] = projectedIndex;
+    projectedIndex += 1;
+  }
+  return projectedIndex === projectedRoles.length ? aligned : null;
 }
 
 export function splitRichMessage(text: string): RichBlock[] {
@@ -92,7 +164,12 @@ export function splitRichMessage(text: string): RichBlock[] {
   const after = text.slice(cursor).trim();
   if (after.length > 0) blocks.push({ kind: "prose", content: after });
   if (blocks.length === 0) blocks.push({ kind: "prose", content: text });
-  return blocks;
+  // Some Tavern display Regex rules deliberately open a visual wrapper when a
+  // control tag starts and rely on the shared SillyTavern message DOM to close
+  // it at the end of the message. An iframe boundary would otherwise close the
+  // wrapper before the following prose. Compose only that structural case;
+  // balanced authored fragments keep the ordinary native prose/iframe flow.
+  return stitchCrossBoundaryWrapper(blocks);
 }
 
 // The authored documents run in a sandboxed data document with a unique

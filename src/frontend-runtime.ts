@@ -318,6 +318,35 @@ export function projectFrontendMessages(session: any, regexScripts: readonly Mes
   });
 }
 
+export async function waitForCommittedFrontendTurn(options: {
+  afterSeq: number;
+  userText: string;
+  flush: () => Promise<void>;
+  readMessages: () => FrontendProjectionMessage[];
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+}): Promise<{ user: FrontendProjectionMessage; assistant: FrontendProjectionMessage } | undefined> {
+  const deadline = Date.now() + (options.timeoutMs ?? 10_000);
+  const pollIntervalMs = options.pollIntervalMs ?? 20;
+  do {
+    const messages = options.readMessages();
+    const user = messages.find((message) => message.seq > options.afterSeq && message.role === "user" && message.text === options.userText);
+    const assistant = messages.find((message) => message.seq > (user?.seq ?? Number.MAX_SAFE_INTEGER) && message.role === "assistant");
+    if (user !== undefined && assistant !== undefined) {
+      // Persist only after the complete turn is visible. Repeated flushes while
+      // rc.2 is still projecting the turn can contend with the agent's own
+      // session commit and delay the projection until this request returns.
+      await options.flush();
+      const durableMessages = options.readMessages();
+      const durableUser = durableMessages.find((message) => message.seq > options.afterSeq && message.role === "user" && message.text === options.userText);
+      const durableAssistant = durableMessages.find((message) => message.seq > (durableUser?.seq ?? Number.MAX_SAFE_INTEGER) && message.role === "assistant");
+      if (durableUser !== undefined && durableAssistant !== undefined) return { user: durableUser, assistant: durableAssistant };
+    }
+    if (Date.now() >= deadline) return undefined;
+    await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
+  } while (true);
+}
+
 // DSH renders adjacent formal assistant messages as one assistant-step. Keep
 // the formal Session messages separate everywhere else, but mirror that native
 // grouping at the DOM projection seam so one verification/oracle message cannot

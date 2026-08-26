@@ -4,7 +4,8 @@ import { frontendDefinitionFromExtensions, messageRegexScriptsFromExtensions, ty
 
 export type CompatibilityDisposition = "完整生效" | "等价替代" | "仅保留" | "已禁用" | "已丢失";
 export type Playability = "ready" | "degraded" | "blocked";
-export const NORMALIZED_CARD_INDEX_VERSION = 7;
+export const NORMALIZED_CARD_INDEX_VERSION = 8;
+export const SUPPORTED_CRITICAL_TAVERN_HELPER_APIS = new Set(["generate"]);
 
 export type CompatibilityRow = { capability: string; disposition: CompatibilityDisposition; evidence: string };
 export type StoredOpening = { id: string; label: string; message: string };
@@ -39,6 +40,8 @@ export type NormalizedCard = {
   worldbook: WorldbookEntry[];
   variableDefinition: CardVariableDefinition;
   tavernHelperScripts: TavernHelperScript[];
+  requiredCriticalTavernHelperApis: string[];
+  missingCriticalTavernHelperApis: string[];
   frontendDefinition?: FrontendDefinition;
   messageRegexScripts: MessageRegexScript[];
   unknownFields: string[];
@@ -180,6 +183,16 @@ function tavernHelperScripts(data: JsonObject): TavernHelperScript[] {
   });
 }
 
+export function requiredCriticalTavernHelperApis(value: unknown): string[] {
+  let serialized = "";
+  try { serialized = typeof value === "string" ? value : JSON.stringify(value); } catch { return []; }
+  return /\bTavernHelper\s*\.\s*generate\s*\(/u.test(serialized) ? ["TavernHelper.generate"] : [];
+}
+
+export function missingCriticalTavernHelperApis(required: readonly string[], supported: ReadonlySet<string> = SUPPORTED_CRITICAL_TAVERN_HELPER_APIS): string[] {
+  return required.filter((api) => !supported.has(api.replace(/^TavernHelper\./u, "")));
+}
+
 function variableObject(value: unknown): VariableObject {
   if (!isObject(value)) return {};
   try {
@@ -242,6 +255,8 @@ export async function parseCard(bytes: Uint8Array, sourceName: string, inflate: 
   const worldbook = rawEntries.map(normalizeWorldbookEntry);
   const variables = variableDefinition(data, openings, worldbook);
   const helperScripts = tavernHelperScripts(data);
+  const requiredHelperApis = requiredCriticalTavernHelperApis(data);
+  const missingHelperApis = missingCriticalTavernHelperApis(requiredHelperApis);
   const frontendDefinition = frontendDefinitionFromExtensions(isObject(data.extensions) ? data.extensions : undefined);
   const messageRegexScripts = messageRegexScriptsFromExtensions(isObject(data.extensions) ? data.extensions : undefined);
   const unsupportedWorldbookFields = new Set<string>();
@@ -262,6 +277,9 @@ export async function parseCard(bytes: Uint8Array, sourceName: string, inflate: 
     { capability: "世界书", disposition: "等价替代", evidence: `${worldbook.length} 条已建立可持久化索引；执行常驻、主次关键词、Regex、递归、互斥组、概率、时间效果、Order 与八种文本位置；向量检索、角色过滤与自动化脚本仍仅保留` },
     ...extensionCapabilities(data, frontendDefinition, messageRegexScripts, helperScripts),
   ];
+  for (const api of requiredHelperApis) compatibilityRows.push(missingHelperApis.includes(api)
+    ? { capability: api, disposition: "已丢失", evidence: `卡内脚本把 ${api} 作为关键启动依赖，但当前 Host 没有声明该接口` }
+    : { capability: api, disposition: "等价替代", evidence: "由 DSH Host 使用当前 Session 绑定的 provider、model、preset 与上下文生成辅助文本；结果不自动写入正式 Conversation" });
   if (frontendDefinition !== undefined) {
     compatibilityRows.push({
       capability: "卡内前端",
@@ -299,7 +317,7 @@ export async function parseCard(bytes: Uint8Array, sourceName: string, inflate: 
   if (unsupportedMacros.size > 0) compatibilityRows.push({ capability: "Tavern 未建模宏", disposition: "仅保留", evidence: `原件保留且不静默执行：${Array.from(unsupportedMacros).slice(0, 12).join("、")}${unsupportedMacros.size > 12 ? "…" : ""}` });
   if (unknownFields.length > 0) compatibilityRows.push({ capability: "未知字段", disposition: "仅保留", evidence: `${unknownFields.length} 个未建模字段留在原件中：${unknownFields.slice(0, 8).join("、")}${unknownFields.length > 8 ? "…" : ""}` });
   const degraded = compatibilityRows.some((row) => row.disposition === "仅保留" || row.disposition === "等价替代" || row.disposition === "已禁用");
-  const playability: Playability = openings.length === 0 ? "blocked" : degraded ? "degraded" : "ready";
+  const playability: Playability = openings.length === 0 || missingHelperApis.length > 0 ? "blocked" : degraded ? "degraded" : "ready";
   return {
     normalizedIndexVersion: NORMALIZED_CARD_INDEX_VERSION,
     revisionId,
@@ -321,12 +339,18 @@ export async function parseCard(bytes: Uint8Array, sourceName: string, inflate: 
     worldbook,
     variableDefinition: variables,
     tavernHelperScripts: helperScripts,
+    requiredCriticalTavernHelperApis: requiredHelperApis,
+    missingCriticalTavernHelperApis: missingHelperApis,
     messageRegexScripts,
     ...(frontendDefinition === undefined ? {} : { frontendDefinition }),
     unknownFields,
     playability,
     statusText: playability === "ready" ? "可开始" : playability === "degraded" ? "可开始，非必需扩展仅保留" : "暂时不能开始",
-    statusDetail: openings.length === 0 ? "卡片没有可用开场，不能建立首条 assistant 消息。" : `${openings.length} 个开场、${worldbook.length} 条世界书已进入 Host 运行时；未执行的扩展逐项列在兼容报告中。`,
+    statusDetail: openings.length === 0
+      ? "卡片没有可用开场，不能建立首条 assistant 消息。"
+      : missingHelperApis.length > 0
+        ? `卡内启动路径缺少关键接口：${missingHelperApis.join("、")}。补齐前不能开始 Session。`
+        : `${openings.length} 个开场、${worldbook.length} 条世界书已进入 Host 运行时；未执行的扩展逐项列在兼容报告中。`,
     compatibilityRows,
     originalBlob: `blobs/${revisionId}`,
   };

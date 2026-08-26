@@ -150,6 +150,13 @@ export function currentOpeningSurfaceSeq(session: any): number | undefined {
   return session?.surface?.nodes?.find((seq: number) => session.events?.[seq]?.type === "assistant/message");
 }
 
+export function currentOpeningText(session: any): string | undefined {
+  const seq = currentOpeningSurfaceSeq(session);
+  if (seq === undefined) return undefined;
+  const event = session.events?.[seq];
+  return messageText(event?.data?.message ?? event?.data);
+}
+
 function messageText(message: any): string {
   if (typeof message?.content === "string") return message.content;
   if (!Array.isArray(message?.content)) return "";
@@ -332,4 +339,14 @@ export function adjacentOpeningId(openings: readonly { id: string }[], currentId
   if (openings.length === 0) return undefined;
   const current = Math.max(0, openings.findIndex((opening) => opening.id === currentId));
   return openings[(current + offset % openings.length + openings.length) % openings.length]?.id;
+}
+
+export function openingIdFromSetChatMessages(messages: unknown, openings: readonly { id: string }[]): string | undefined {
+  if (!Array.isArray(messages) || messages.length !== 1) return undefined;
+  const selection = messages[0];
+  if (selection === null || typeof selection !== "object" || Array.isArray(selection)) return undefined;
+  const { message_id: messageId, swipe_id: swipeId } = selection as Record<string, unknown>;
+  if (messageId !== 0 || !Number.isInteger(swipeId) || (swipeId as number) < 0) return undefined;
+  const openingId = `opening-${swipeId as number}`;
+  return openings.some((opening) => opening.id === openingId) ? openingId : undefined;
 }
