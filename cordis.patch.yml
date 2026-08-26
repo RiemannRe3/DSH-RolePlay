@@ -1,0 +1,4 @@
+# DSH Re3 RP host runtime plus the accepted #101 sidebar adapter.
+- insert:
+    - id: dsh-re3-rp
+      name: 'dsh-re3-rp'

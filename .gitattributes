@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.gif -text
+*.jpg -text
+*.png -text
+*.wasm -text

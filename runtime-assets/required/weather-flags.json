@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "asset_id": "weather-flags",
+  "marker": "FT_REMOTE_ASSET_OK_V1",
+  "signal": "北风三级",
+  "required": true
+}

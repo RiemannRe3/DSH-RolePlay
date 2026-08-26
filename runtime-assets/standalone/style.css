@@ -1,0 +1,7 @@
+:root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; background: #07131f; color: #e7f2ff; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; }
+main { width: min(620px, calc(100vw - 40px)); padding: 28px; border: 1px solid #376a91; border-radius: 18px; background: linear-gradient(145deg, #10283c, #091923); box-shadow: 0 20px 70px #0008; }
+.eyebrow { color: #79c9ff; font-size: 12px; letter-spacing: .14em; }
+button { border: 0; border-radius: 999px; padding: 11px 18px; background: #79c9ff; color: #06111a; font-weight: 700; cursor: pointer; }
+button:disabled { opacity: .55; cursor: wait; }
+#event[data-error] { color: #ff9f9f; }
