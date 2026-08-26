@@ -4,7 +4,7 @@ import { NORMALIZED_CARD_INDEX_VERSION, parseCard, sha256, type NormalizedCard }
 import { activateWorldbookWithRenderer, normalizeWorldbookEntry, placeWorldbook, substituteCardMacros, type WorldbookActivation } from "./worldbook.js";
 import { applyCompiledPromptToRequest, compileTavernPrompt, compiledTavernSystemPrompt, normalizeTavernChatMessages, renderTavernContextEnvelope, type CompiledTavernPrompt } from "./prompt-compiler.js";
 import { DEFAULT_TAVERN_PRESET, exportSillyTavernPreset, normalizeTavernPreset, type TavernPromptPreset } from "./preset-runtime.js";
-import { createTavernSessionSeed, currentOpeningSurfaceSeq, currentOpeningText, currentWorldbookSurfaceSeq, hasPlayerMessage, isolateTavernAssembly, openingIdFromSetChatMessages, tavernSurfaceAudit, tavernSurfaceEventDetail, TAVERN_WORLD_CONTEXT_MARKER, upsertTavernAssemblyContext, worldbookContextRevision, type TavernAssemblySummary } from "./session-runtime.js";
+import { createTavernSessionSeed, currentOpeningSurfaceSeq, currentOpeningText, currentWorldbookSurfaceSeq, hasPlayerMessage, isTavernPluginId, isolateTavernAssembly, openingIdFromSetChatMessages, tavernSurfaceAudit, tavernSurfaceEventDetail, TAVERN_PLUGIN_ID, TAVERN_WORLD_CONTEXT_MARKER, upsertTavernAssemblyContext, worldbookContextRevision, type TavernAssemblySummary } from "./session-runtime.js";
 import { applyVariableUpdate, CommittedReplyVariableGate, initializeVariableRuntime, mergeVariableScopes, variableStateDigest, type VariableObject, type VariableRuntimeEvent, type VariableSource, type VariableUpdateResult } from "./variable-runtime.js";
 import { adaptOpeningFrontendHtml, applyFrontendStateAction, bridgeCapabilities, frontendStateDigest, groupFrontendMessagesForNativeFlow, initialFrontendState, projectFrontendMessages, waitForCommittedFrontendTurn, type FrontendDefinition, type FrontendProjection } from "./frontend-runtime.js";
 import { createEjsRuntime } from "./ejs-runtime.js";
@@ -15,7 +15,7 @@ import { personaBindingKey, personaBindingKeysToClearForSelection, renderPersona
 import { applyTavernHelperGenerateInjections, generateScanText, normalizeTavernHelperGenerateConfig } from "./auxiliary-generation.js";
 import { hideCardFromLibrary, orderVisibleCards, preserveCardLibraryMetadata, reorderVisibleCards, restoreCardToLibrary, type CardLibraryRecord } from "./card-library.js";
 
-export const name = "dsh-re3-rp";
+export const name = "dsh-roleplay";
 export const inject = ["webServer", "sessions", "sessionPersistence", "storageDomain", "agents", "agentDefaultModel", "llm"];
 
 type RecordValue = Record<string, unknown>;
@@ -165,7 +165,7 @@ function sessionTexts(session: any): string[] {
   return events.flatMap((event: any) => {
     if (event?.type !== "user/message" && event?.type !== "assistant/message") return [];
     const message = event.data?.message ?? event.data;
-    if (message?.source?.kind === "plugin" && message.source.plugin === "dsh-re3-rp") return [];
+    if (message?.source?.kind === "plugin" && isTavernPluginId(message.source.plugin)) return [];
     const value = messageText(message);
     return value.length === 0 ? [] : [value];
   }) ?? [];
@@ -290,7 +290,7 @@ function replaceOpening(session: any, text: string): void {
     id: crypto.randomUUID(),
     role: "assistant",
     content: [{ type: "text", text }],
-    source: { kind: "model", provider: "dsh-re3-rp", model: "character-card-opening" },
+    source: { kind: "model", provider: TAVERN_PLUGIN_ID, model: "character-card-opening" },
   };
   session.append("assistant/message", { turn: 1, step: 1, message }, {
     surfaceOp: { op: "replace", start: target, end: target },
@@ -310,7 +310,7 @@ export async function apply(ctx: any): Promise<() => Promise<void>> {
   const ejsRuntime = await createEjsRuntime();
   try {
   const dshHome = hostGlobal.process.env.DSH_HOME;
-  if (typeof dshHome !== "string" || dshHome.length === 0) throw new Error("dsh-re3-rp 需要隔离的 DSH_HOME");
+  if (typeof dshHome !== "string" || dshHome.length === 0) throw new Error("dsh-roleplay 需要隔离的 DSH_HOME");
   const blobRoot = path.join(dshHome, "dsh-re3-rp", "blobs");
   const frontendAssetRoot = path.join(dshHome, "dsh-re3-rp", "frontend-assets");
   fs.mkdirSync(blobRoot, { recursive: true });
@@ -1077,7 +1077,7 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
       if (event?.type !== "assistant/message") return [];
       const message = event.data?.message ?? event.data;
       if (message?.source?.kind === "plugin") return [];
-      if (message?.source?.provider === "dsh-re3-rp" && message?.source?.model === "character-card-opening") return [];
+      if (isTavernPluginId(message?.source?.provider) && message?.source?.model === "character-card-opening") return [];
       const value = messageText(message);
       return value.length === 0 ? [] : [value];
     });
@@ -1271,7 +1271,7 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
         content: [{ type: "text", text: correction.length === 0
           ? "根据刚刚完成的当前剧情，只执行分步 MVU 变量更新。严格遵守 [mvu_update] 指令，只输出完整的 <UpdateVariable> 块，不要续写剧情。"
           : `上一次变量更新被 Host 原子校验拒绝：${correction}\n请修正路径或操作类型；缺少的对象分支使用 insert 创建。重新输出一个完整的 <UpdateVariable> 块，不要续写剧情。` }],
-        source: { kind: "plugin", plugin: "dsh-re3-rp", form: attempt === 0 ? "split-mvu" : "split-mvu-repair" },
+        source: { kind: "plugin", plugin: TAVERN_PLUGIN_ID, form: attempt === 0 ? "split-mvu" : "split-mvu-repair" },
       });
       splitMvuRequestGuards.add(options);
       let body = "";

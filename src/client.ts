@@ -17,7 +17,7 @@ type ModuleLoader = {
 const clientWindow = window as unknown as { __ModuleLoader__: ModuleLoader };
 
 clientWindow.__ModuleLoader__.load({
-  id: "dsh-re3-rp",
+  id: "dsh-roleplay",
   factory: (requireModule) => {
     const module: { exports: Record<string, unknown> } = { exports: {} };
     const React = requireModule("react");
@@ -2462,16 +2462,16 @@ body:has(.tavern-capability-panel[data-capability="preset"]){--tavern-capability
       const disposers: Array<() => void> = [];
       if (typeof document !== "undefined") {
         const style = document.createElement("style");
-        style.dataset.plugin = "dsh-re3-rp";
+        style.dataset.plugin = "dsh-roleplay";
         style.textContent = `${STYLE}\n${FRONTEND_CALL_STYLE}`;
         document.head.appendChild(style);
         disposers.push(() => style.remove());
       }
-      disposers.push(ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({ name: "sidebar.footer.action", id: "dsh-re3-rp-integration", order: 15 }, SidebarIntegration)));
+      disposers.push(ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({ name: "sidebar.footer.action", id: "dsh-roleplay-integration", order: 15 }, SidebarIntegration)));
       disposers.push(ctx.slots.inject("conversation.view", () => ctx.slots.register({ name: "conversation.view", id: "tavern", order: 30, label: () => "酒馆" }, TavernContextView)));
-      disposers.push(ctx.slots.inject("conversation.composer.dock", () => ctx.slots.register({ name: "conversation.composer.dock", id: "dsh-re3-rp-native-message-adapter", order: 90 }, TavernNativeMessageAdapter)));
-      disposers.push(ctx.slots.inject("conversation.input.dock", () => ctx.slots.register({ name: "conversation.input.dock", id: "dsh-re3-rp-trajectory-surface-adapter", order: 19 }, TavernTrajectorySurfaceAdapter)));
-      disposers.push(ctx.slots.inject("conversation.input.dock", () => ctx.slots.register({ name: "conversation.input.dock", id: "dsh-re3-rp-opening-switcher", order: 20 }, TavernOpeningSwitcher)));
+      disposers.push(ctx.slots.inject("conversation.composer.dock", () => ctx.slots.register({ name: "conversation.composer.dock", id: "dsh-roleplay-native-message-adapter", order: 90 }, TavernNativeMessageAdapter)));
+      disposers.push(ctx.slots.inject("conversation.input.dock", () => ctx.slots.register({ name: "conversation.input.dock", id: "dsh-roleplay-trajectory-surface-adapter", order: 19 }, TavernTrajectorySurfaceAdapter)));
+      disposers.push(ctx.slots.inject("conversation.input.dock", () => ctx.slots.register({ name: "conversation.input.dock", id: "dsh-roleplay-opening-switcher", order: 20 }, TavernOpeningSwitcher)));
       return () => {
         for (const dispose of disposers.reverse()) dispose();
         listeners.clear();

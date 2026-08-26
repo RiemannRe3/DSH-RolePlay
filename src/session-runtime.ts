@@ -1,5 +1,10 @@
+// Keep the context prefix stable: it is persisted in existing DSH Sessions.
 export const TAVERN_CONTEXT_PREFIX = "dsh-re3-rp:";
-export const TAVERN_PLUGIN_ID = "dsh-re3-rp";
+export const TAVERN_PLUGIN_ID = "dsh-roleplay";
+export const LEGACY_TAVERN_PLUGIN_ID = "dsh-re3-rp";
+export function isTavernPluginId(value: unknown): boolean {
+  return value === TAVERN_PLUGIN_ID || value === LEGACY_TAVERN_PLUGIN_ID;
+}
 export const TAVERN_WORLD_CONTEXT_MARKER = "[DSH_RE3_RP_WORLD_CONTEXT]";
 export const TAVERN_ASSEMBLY_MARKER = "[DSH_RE3_RP_ASSEMBLY]";
 
@@ -70,7 +75,7 @@ export function currentAssemblySurfaceSeq(session: any): number | undefined {
   return session?.surface?.nodes?.find((seq: number) => {
     const event = session.events?.[seq];
     const message = event?.data?.message ?? event?.data;
-    return event?.type === "user/message" && message?.source?.kind === "plugin" && message.source.plugin === TAVERN_PLUGIN_ID && message.source.form === "assembly";
+    return event?.type === "user/message" && message?.source?.kind === "plugin" && isTavernPluginId(message.source.plugin) && message.source.form === "assembly";
   });
 }
 
@@ -128,7 +133,7 @@ export function createTavernSessionSeed(
       id: crypto.randomUUID(),
       role: "assistant",
       content: [{ type: "text", text: openingText }],
-      source: { kind: "model", provider: "dsh-re3-rp", model: "character-card-opening" },
+      source: { kind: "model", provider: TAVERN_PLUGIN_ID, model: "character-card-opening" },
     },
   }, "append");
   append("step/end", { turn, step });
@@ -171,7 +176,7 @@ export function currentWorldbookSurfaceSeq(session: any): number | undefined {
     const event = session.events?.[seq];
     if (event?.type !== "user/message") return false;
     const message = event.data?.message ?? event.data;
-    return message?.source?.kind === "plugin" && message.source.plugin === TAVERN_PLUGIN_ID && messageText(message).startsWith(TAVERN_WORLD_CONTEXT_MARKER);
+    return message?.source?.kind === "plugin" && isTavernPluginId(message.source.plugin) && messageText(message).startsWith(TAVERN_WORLD_CONTEXT_MARKER);
   });
 }
 
@@ -179,21 +184,21 @@ export function worldbookContextRevision(session: any): number {
   return (session?.events ?? []).filter((event: any) => {
     if (event?.type !== "user/message") return false;
     const message = event.data?.message ?? event.data;
-    return message?.source?.kind === "plugin" && message.source.plugin === TAVERN_PLUGIN_ID && messageText(message).startsWith(TAVERN_WORLD_CONTEXT_MARKER);
+    return message?.source?.kind === "plugin" && isTavernPluginId(message.source.plugin) && messageText(message).startsWith(TAVERN_WORLD_CONTEXT_MARKER);
   }).length;
 }
 
 function surfaceEventKind(event: any): TavernSurfaceAuditEntry["kind"] | undefined {
   if (event?.type === "user/message") {
     const message = event.data?.message ?? event.data;
-    if (message?.source?.kind === "plugin" && message.source.plugin === TAVERN_PLUGIN_ID && message.source.form === "assembly") return "assembly";
-    if (message?.source?.kind === "plugin" && message.source.plugin === TAVERN_PLUGIN_ID && messageText(message).startsWith(TAVERN_WORLD_CONTEXT_MARKER)) return "worldbook";
+    if (message?.source?.kind === "plugin" && isTavernPluginId(message.source.plugin) && message.source.form === "assembly") return "assembly";
+    if (message?.source?.kind === "plugin" && isTavernPluginId(message.source.plugin) && messageText(message).startsWith(TAVERN_WORLD_CONTEXT_MARKER)) return "worldbook";
     if (message?.source?.kind === "plugin") return "context";
     return "user";
   }
   if (event?.type === "assistant/message") {
     const message = event.data?.message ?? event.data;
-    if (message?.source?.provider === "dsh-re3-rp" && message.source.model === "character-card-opening") return "opening";
+    if (isTavernPluginId(message?.source?.provider) && message.source.model === "character-card-opening") return "opening";
     return "assistant";
   }
   if (event?.type === "tool/result") return "tool";

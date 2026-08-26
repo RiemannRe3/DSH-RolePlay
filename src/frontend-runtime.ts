@@ -223,11 +223,11 @@ function bridgeBootstrap(sessionId: string): string {
     return body.result;
   }
   window.__dshTavernSubmitHost = Object.freeze({
-    bridgeVersion: 'dsh-re3-rp-v1',
+    bridgeVersion: 'dsh-roleplay-v1',
     submitTurn: payload => call('submitTurn', payload)
   });
   window.__dshTavernStateHost = Object.freeze({
-    bridgeVersion: 'dsh-re3-rp-v1',
+    bridgeVersion: 'dsh-roleplay-v1',
     async getProjection() {
       const projection = await call('getProjection');
       return { ...projection.state, state_digest: projection.stateDigest };
@@ -305,7 +305,7 @@ export function projectFrontendMessages(session: any, regexScripts: readonly Mes
     const message = event.data?.message ?? event.data;
     const text = messageText(message);
     const role = event.type === "user/message" ? "user" : "assistant";
-    const isCardOpening = message?.source?.provider === "dsh-re3-rp" && message?.source?.model === "character-card-opening";
+    const isCardOpening = (message?.source?.provider === "dsh-roleplay" || message?.source?.provider === "dsh-re3-rp") && message?.source?.model === "character-card-opening";
     const afterPlayerTurn = role === "assistant" && !isCardOpening && formalNodes.slice(0, nodeIndex).some((candidateSeq: number) => session?.events?.[candidateSeq]?.type === "user/message");
     const display = role === "assistant"
       ? assistantDisplayProjection(text, regexScripts, afterPlayerTurn)

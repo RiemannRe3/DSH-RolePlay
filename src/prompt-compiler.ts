@@ -329,7 +329,7 @@ export function applyCompiledPromptToRequest(options: any, compiled: CompiledTav
     id: crypto.randomUUID(),
     role: message.role,
     content: [{ type: "text", text: message.content }],
-    source: message.role === "assistant" ? { kind: "model", provider: "dsh-re3-rp", model: "compiled-context" } : { kind: "plugin", plugin: "dsh-re3-rp", form: "compiled", compiledSource: message.source },
+    source: message.role === "assistant" ? { kind: "model", provider: "dsh-roleplay", model: "compiled-context" } : { kind: "plugin", plugin: "dsh-roleplay", form: "compiled", compiledSource: message.source },
   }));
   const leadingSystem: string[] = [];
   while (messages[0]?.role === "system") leadingSystem.push(messages.shift()!.content[0]!.text);
