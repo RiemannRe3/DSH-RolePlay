@@ -9,6 +9,7 @@ declare function adaptRealCardFrontendHtml(value: string): string;
 declare function measureRichFrameContentHeight(metrics: RichFrameContentMetrics): number;
 declare function clampRichFrameHeight(value: number): number;
 declare function buildSillyTavernCompatibilityContext(messageCount: number, currentMessageId: number): SillyTavernCompatibilityContext;
+declare function recoverRestoredClientSession(sessions: any, options: { sessionId: string; timeoutMs?: number; reload(): void }): Promise<"ready" | "reloaded" | "missing">;
 
 type ModuleLoader = {
   load(definition: { id: string; factory: (requireModule: (id: string) => any) => Record<string, unknown> }): void;
@@ -17,7 +18,7 @@ type ModuleLoader = {
 const clientWindow = window as unknown as { __ModuleLoader__: ModuleLoader };
 
 clientWindow.__ModuleLoader__.load({
-  id: "dsh-roleplay",
+  id: "@riemannre3/dsh-roleplay",
   factory: (requireModule) => {
     const module: { exports: Record<string, unknown> } = { exports: {} };
     const React = requireModule("react");
@@ -105,7 +106,7 @@ clientWindow.__ModuleLoader__.load({
     type TavernPresetDraft = {
       id: string; name: string; source: "builtin" | "created" | "imported"; revision: number; createdAt: string; updatedAt: string;
       worldInfoFormat: string;
-      settings: { contextTokens: number; maxReplyTokens: number; stream: boolean; temperature: number; topP: number; frequencyPenalty: number; presencePenalty: number; maxContextUnlocked: boolean };
+      settings: { contextTokens: number | null; maxReplyTokens: number | null; stream: boolean; temperature: number; topP: number; frequencyPenalty: number; presencePenalty: number; maxContextUnlocked: boolean };
       prompts: TavernPromptDraft[]; promptOrder: Array<{ identifier: string; enabled: boolean }>; extra: Record<string, unknown>;
     };
     type TavernPresetState = {
@@ -1071,10 +1072,10 @@ clientWindow.__ModuleLoader__.load({
       const selectedOrderedIndex = ordered.findIndex(({ prompt }) => prompt.identifier === selectedPrompt?.identifier);
       const pinnedIds = new Set(["main", "worldInfoBefore", "personaDescription", "charDescription", "charPersonality", "scenario", "enhanceDefinitions", "nsfw", "worldInfoAfter", "dialogueExamples", "chatHistory", "jailbreak"]);
       const contentEditable = selectedPrompt !== null && (selectedPrompt.marker === undefined || selectedPrompt.marker === "main-prompt" || selectedPrompt.marker === "post-history-instructions");
-      const slider = (key: keyof TavernPresetDraft["settings"], label: string, minimum: number, maximum: number, step: number, note: string): any => {
+      const slider = (key: keyof TavernPresetDraft["settings"], label: string, minimum: number, maximum: number, step: number): any => {
         const value = Number(draft.settings[key]);
         return h("label", { className: "tavern-preset-slider" },
-          h("span", null, h("strong", null, label), h("em", null, note)),
+          h("span", null, h("strong", null, label)),
           h("div", null,
             h("input", { type: "range", min: minimum, max: maximum, step, value, onChange: (event: any) => updateDraft((next) => { (next.settings as any)[key] = Number(event.target.value); }) }),
             h("input", { type: "number", min: minimum, max: maximum, step, value, onChange: (event: any) => updateDraft((next) => { (next.settings as any)[key] = Number(event.target.value); }) })));
@@ -1103,12 +1104,12 @@ clientWindow.__ModuleLoader__.load({
           notice ? h("p", { className: "tavern-preset-notice", role: "status" }, notice) : null,
           error ? h("p", { className: "tavern-preset-error", role: "alert" }, error) : null,
           h("details", { className: "tavern-preset-advanced" },
-            h("summary", null, h("strong", null, "高级设置"), h("span", null, "DeepSeek 默认：温度 1 · Top P 1")),
+            h("summary", null, h("strong", null, "高级设置")),
             h("div", { className: "tavern-preset-advanced-body" },
-              h("p", null, "通常不用调整。DeepSeek 官方建议温度和 Top P 二选一；流式回复始终开启。"),
+              h("p", { className: "tavern-preset-runtime-note" }, "DeepSeek 默认：温度 1 · Top P 1。当前 DSH 仅保存 Top P 以兼容 SillyTavern JSON；实际请求由当前提供方支持的参数决定。"),
               h("div", { className: "tavern-preset-samplers" },
-                slider("temperature", "温度", 0, 2, 0.01, "实际请求"),
-                slider("topP", "Top P", 0, 1, 0.01, "当前 DSH 仅保存")),
+                slider("temperature", "温度", 0, 2, 0.01),
+                slider("topP", "Top P", 0, 1, 0.01)),
               h("button", { type: "button", className: "tavern-preset-reset-sampling", onClick: () => updateDraft((value) => { value.settings.temperature = 1; value.settings.topP = 1; }) }, "恢复 DeepSeek 默认值"))),
           h("section", { className: "tavern-preset-prompts" },
             h("nav", { className: "tavern-preset-prompt-nav", "aria-label": "提示词" },
@@ -2196,7 +2197,7 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
           }
           if (message.kind !== "request" || typeof message.id !== "number") return;
           if (message.action === "setDraft") {
-            const composer = document.querySelector<HTMLTextAreaElement>('textarea[placeholder="给智能体发消息"]');
+            const composer = document.querySelector<HTMLTextAreaElement>("textarea[data-phase]");
             if (composer === null || typeof message.payload?.text !== "string") {
               frame.contentWindow?.postMessage({ source: "dsh-re3-rp-rich-host", token: message.token, kind: "response", id: message.id, ok: false, error: { code: "bridge_unavailable", message: "找不到当前 DSH 输入框" } }, "*");
               return;
@@ -2287,10 +2288,12 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
 
     function applySidebarMode(slot: HTMLElement, host: HTMLElement, mode: "workspace" | "tavern"): void {
       slot.dataset.tavernMode = mode;
-      // DSH's Narrative adapter owns data-nwh-native-workspace. Marking its
-      // host here makes the two adapters hide each other in the default mode.
       for (const child of Array.from(slot.children) as HTMLElement[]) {
-        if (child !== host) delete child.dataset.tavernNativeWorkspace;
+        // Narrative owns data-nwh-native-workspace and data-nwh-sidebar-mode-host;
+        // exclude its host so Tavern only labels the native DSH Workspace browser.
+        const isNativeWorkspace = child !== host && !child.hasAttribute("data-nwh-sidebar-mode-host");
+        if (isNativeWorkspace) child.setAttribute("data-tavern-native-workspace", "true");
+        else child.removeAttribute("data-tavern-native-workspace");
       }
     }
 
@@ -2370,7 +2373,7 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
 .tavern-context-workbench.has-inspector{grid-template-columns:minmax(0,1fr) 386px}.tavern-context-workbench.has-inspector .tavern-context-table-head,.tavern-context-workbench.has-inspector .tavern-context-row-main{grid-template-columns:46px 82px minmax(145px,1fr) 58px 42px}.tavern-context-workbench>.tavern-context-inspector{border-left:1px solid #dfe2e5;background:#fdfdfd;box-shadow:none}.tavern-context-inspector-header{min-height:54px;align-items:center;border-bottom-color:#dfe2e5;padding:0 16px}.tavern-context-inspector-header>div{grid-template-columns:auto minmax(0,1fr);gap:2px 9px}.tavern-context-inspector-header strong{font-size:13px;font-weight:600}.tavern-context-inspector-header small{color:#61666b;font:10px/1.2 ui-monospace,SFMono-Regular,Consolas,monospace}.tavern-context-inspector-header>button{width:28px;height:28px;border-radius:4px;color:#61666b}.tavern-context-inspector-tabs{height:42px;gap:28px;border-bottom-color:#dfe2e5;padding:0 16px}.tavern-context-inspector-tabs button{height:42px;color:#61666b;font:400 13px/42px inherit}.tavern-context-inspector-tabs button[aria-selected=true]{color:#3478f6;font-weight:400}.tavern-context-inspector-tabs button[aria-selected=true]::after{background:#3478f6}.tavern-context-inspector-content pre{padding:16px 18px 60px;color:#0f1115;font-family:inherit;font-size:14px;font-weight:400;line-height:1.72}.tavern-context-inspector-copy{top:10px;height:26px;margin:10px 12px 0 8px;border:0;border-radius:4px;padding:0 6px;background:transparent;color:#61666b;font-size:10px}.tavern-context-inspector-evidence>p{padding:16px 18px;color:#61666b;font-size:12px;line-height:1.65}.tavern-context-workbench .tavern-context-activation-cards{gap:10px;padding:16px 18px}.tavern-context-workbench .tavern-context-activation-cards article{border:0;border-left:3px solid #2aa65a;border-radius:0;padding:8px 11px;background:#f7faf8}.tavern-context-workbench .tavern-context-activation-cards strong{font-size:12px}.tavern-context-workbench .tavern-context-activation-cards span{color:#2a7d49;font-size:9px}.tavern-context-workbench .tavern-context-activation-cards p{color:#61666b;font-size:11px;line-height:1.5}
 @media(max-width:980px){.tavern-context-toolbar{grid-template-columns:180px minmax(100px,1fr) 220px}.tavern-context-workbench.has-inspector{grid-template-columns:minmax(0,1fr) 340px}}@media(max-width:720px){.tavern-context-toolbar{grid-template-columns:1fr auto;grid-template-rows:auto auto auto;padding:8px 12px}.tavern-context-workbench.has-inspector{display:block}.tavern-context-workbench.has-inspector .tavern-context-table-head,.tavern-context-workbench.has-inspector .tavern-context-row-main{grid-template-columns:36px 76px minmax(130px,1fr) 58px 46px}.tavern-context-inspector{position:absolute;z-index:8;inset:0 0 0 auto;width:min(88%,360px);box-shadow:-12px 0 32px rgba(25,39,64,.18)}}
 [data-tavern-sidebar-host="true"],.tavern-sidebar-content{box-sizing:border-box;min-width:0;color:var(--dsw-alias-label-primary,#17191d);font-family:inherit}
-[data-tavern-sidebar-host="true"]{flex:none;padding:2px 8px 8px 4px}[data-slot="sidebar.workspaces"][data-tavern-mode="tavern"]>[data-tavern-sidebar-host="true"]{display:flex;flex:1;min-height:0;padding-bottom:0}[data-slot="sidebar.workspaces"][data-tavern-mode="tavern"][data-nwh-mode="chat"]>[data-nwh-sidebar-mode-host="true"]{display:none!important}.tavern-sidebar-content{display:flex;flex:1;min-height:0;flex-direction:column;animation:tavern-content-in .16s ease-out}@keyframes tavern-content-in{from{opacity:.45;transform:translateX(4px)}to{opacity:1;transform:none}}
+[data-tavern-sidebar-host="true"]{flex:none;padding:2px 8px 8px 4px}[data-slot="sidebar.workspaces"][data-tavern-mode="tavern"]>[data-tavern-sidebar-host="true"]{display:flex;flex:1;min-height:0;padding-bottom:0}[data-slot="sidebar.workspaces"][data-tavern-mode="tavern"]>[data-tavern-native-workspace="true"]{display:none!important}[data-slot="sidebar.workspaces"][data-tavern-mode="tavern"][data-nwh-mode="chat"]>[data-nwh-sidebar-mode-host="true"]{display:none!important}.tavern-sidebar-content{display:flex;flex:1;min-height:0;flex-direction:column;animation:tavern-content-in .16s ease-out}@keyframes tavern-content-in{from{opacity:.45;transform:translateX(4px)}to{opacity:1;transform:none}}
 .tavern-panel-screen{min-height:0;flex:1;overflow:auto;padding:10px 4px 14px}.tavern-tabs{display:flex;flex:none;height:40px;border-bottom:1px solid var(--dsw-alias-border-l1,#e4e6e9);gap:22px;padding:0 8px}.tavern-tabs button{position:relative;display:flex;align-items:center;gap:6px;border:0;padding:0;background:transparent;color:var(--dsw-alias-label-secondary,#727985);cursor:pointer;font:500 14px/40px inherit}.tavern-tabs button[aria-selected=true]{color:#1757b8;font-weight:650}.tavern-tabs button[aria-selected=true]::after{position:absolute;right:0;bottom:-1px;left:0;height:2px;border-radius:2px;background:#2d69c9;content:""}
 [data-sidebar-collapsed] [data-tavern-sidebar-host="true"]{padding:0 0 10px}[data-sidebar-collapsed] [data-slot="sidebar.workspaces"][data-tavern-mode="tavern"]>[data-tavern-sidebar-host="true"]{flex:none;min-height:auto;padding-bottom:10px}[data-sidebar-collapsed] .tavern-sidebar-content{flex:none}[data-sidebar-collapsed] .tavern-panel-screen{display:none}[data-sidebar-collapsed] .tavern-tabs{width:36px;height:auto;box-sizing:border-box;flex-direction:column;gap:2px;border:1px solid var(--dsw-alias-border-l2,#d7dbe1);border-radius:10px;padding:3px;background:color-mix(in srgb,var(--dsw-specific-sidebar-fill,#f7f8fa) 82%,var(--dsw-alias-bg-base,#fff) 18%)}[data-sidebar-collapsed] .tavern-tabs button{display:grid;width:28px;height:28px;place-items:center;border-radius:7px;padding:0;line-height:1}[data-sidebar-collapsed] .tavern-tabs button:hover{background:var(--dsw-alias-interactive-bg-hover,#eef0f3);color:var(--dsw-alias-label-primary,#17191d)}[data-sidebar-collapsed] .tavern-tabs button[aria-selected=true]{background:var(--dsw-alias-bg-base,#fff);box-shadow:0 1px 4px rgba(25,36,60,.1)}[data-sidebar-collapsed] .tavern-tabs button[aria-selected=true]::after{display:none}[data-sidebar-collapsed] .tavern-tab-label{display:none}
 .tavern-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;margin:14px 2px 15px}.tavern-search{display:flex;align-items:center;gap:7px;height:34px;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2,#d6d9de);border-radius:8px;padding:0 9px;color:var(--dsw-alias-label-tertiary,#858b95);background:var(--dsw-alias-bg-base,#fff)}.tavern-search:focus-within{border-color:#8daadd;box-shadow:0 0 0 2px rgba(75,119,192,.1)}.tavern-search input{min-width:0;width:100%;border:0;outline:0;background:transparent;color:inherit;font:400 12px/1 inherit}.tavern-import-button{display:flex;align-items:center;gap:5px;height:34px;border:0;border-radius:8px;padding:0 8px;background:transparent;color:inherit;cursor:pointer;font:550 12px/1 inherit}.tavern-import-button:hover{background:var(--dsw-alias-interactive-bg-hover,#f0f1f3)}.tavern-import-button:disabled{cursor:wait;opacity:.55}.tavern-file-input{display:none}.tavern-library-label{display:flex;align-items:center;justify-content:space-between;margin:0 5px 4px}.tavern-library-label strong{font-size:12px}.tavern-library-label small{color:var(--dsw-alias-label-tertiary,#8a909a);font-size:10px}
@@ -2443,7 +2446,7 @@ body:has(.tavern-capability-panel[data-capability="preset"]){--tavern-capability
 .tavern-regex-settings,.tavern-regex-evidence{min-height:0;flex:1;overflow:auto;background:#f5f7fa}.tavern-regex-overview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;border-bottom:1px solid #e3e7eb;padding:12px 16px;background:#f7f9fc}.tavern-regex-overview>div{display:flex;min-width:0;flex-direction:column;gap:3px;border:1px solid #e2e6eb;border-radius:9px;padding:9px 10px;background:#fff}.tavern-regex-overview strong{overflow:hidden;color:#20252b;font-size:16px;line-height:1.15;text-overflow:ellipsis;white-space:nowrap}.tavern-regex-overview span{overflow:hidden;color:#7c848d;font-size:8px;text-overflow:ellipsis;white-space:nowrap}.tavern-regex-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;border-bottom:1px solid #e3e7eb;padding:10px 16px;background:#fff}.tavern-regex-toolbar .tavern-capability-search{height:34px;margin:0}.tavern-regex-debug-button{display:inline-flex;height:34px;align-items:center;gap:6px;border:1px solid #cbd9eb;border-radius:7px;padding:0 10px;background:#f6f9fd;color:#2b65ad;cursor:pointer;font:600 9px/1 inherit}.tavern-regex-debug-button:hover{border-color:#9ebbe0;background:#edf4fd}.tavern-regex-scopes{padding:12px 14px 48px}.tavern-regex-scope{margin-bottom:10px;border:1px solid #dfe4e9;border-radius:10px;background:#fff;box-shadow:0 1px 2px #1b2d4510;overflow:hidden}.tavern-regex-scope>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 12px}.tavern-regex-scope>header>div{display:flex;min-width:0;flex-direction:column;gap:3px}.tavern-regex-scope>header strong{color:#2b3138;font-size:11px}.tavern-regex-scope>header span{overflow:hidden;color:#7d8690;font-size:8.5px;text-overflow:ellipsis;white-space:nowrap}.tavern-regex-scope>header em{flex:none;border-radius:999px;padding:3px 7px;background:#eef1f4;color:#747d87;font-size:8px;font-style:normal}.tavern-regex-scope>p{margin:0;border-top:1px solid #edf0f2;padding:9px 12px;color:#7d858e;font-size:9px;line-height:1.55}.tavern-regex-scope.is-unavailable{background:#fafbfc}.tavern-regex-scope.is-unavailable>header{opacity:.75}.tavern-regex-scope.is-current{border-color:#cad9ec}.tavern-regex-scope.is-current>header{background:#f7faff}.tavern-regex-scope.is-current>header em{background:#e7f1ff;color:#2464b5}.tavern-regex-rule-list{border-top:1px solid #e4e9ef}.tavern-regex-rule-list>article+article{border-top:1px solid #e8ecf0}.tavern-regex-rule-list>article>button{display:grid;width:100%;min-height:58px;box-sizing:border-box;grid-template-columns:28px minmax(0,1fr) auto 16px;align-items:center;gap:8px;border:0;padding:8px 10px;background:#fff;color:#30363d;cursor:pointer;text-align:left}.tavern-regex-rule-list>article>button:hover{background:#f7faff}.tavern-regex-rule-list>article.is-expanded>button{background:#eef5ff;color:#205fae}.tavern-regex-order{display:grid;width:25px;height:25px;place-items:center;border-radius:7px;background:#f0f2f5;color:#737c86;font:650 8px/1 ui-monospace,SFMono-Regular,Consolas,monospace}.tavern-regex-rule-list>article.is-expanded .tavern-regex-order{background:#dcecff;color:#1d61b7}.tavern-regex-rule-copy{display:flex;min-width:0;flex-direction:column;gap:4px}.tavern-regex-rule-copy strong,.tavern-regex-rule-copy small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tavern-regex-rule-copy strong{font-size:10.5px}.tavern-regex-rule-copy small{color:#7a838d;font-size:8px}.tavern-regex-enabled{border-radius:999px;padding:3px 7px;background:#eaf7ef;color:#277949;font-size:8px;white-space:nowrap}.tavern-regex-rule-detail{border-top:1px solid #dfe8f2;padding:12px;background:#fbfdff}.tavern-regex-rule-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-bottom:12px}.tavern-regex-rule-facts>div{display:flex;min-width:0;flex-direction:column;gap:3px;border:1px solid #e5eaf0;border-radius:7px;padding:7px 8px;background:#fff}.tavern-regex-rule-facts span{color:#828b95;font-size:7.5px}.tavern-regex-rule-facts strong{overflow-wrap:anywhere;color:#343b43;font-size:8.5px;line-height:1.4}.tavern-regex-rule-detail>label{display:block;margin:10px 0 5px;color:#6f7882;font-size:8px;font-weight:650}.tavern-regex-rule-detail>pre{max-height:180px;margin:0;overflow:auto;border:1px solid #e2e7ed;border-radius:7px;padding:9px;background:#f6f8fa;color:#293039;font:8.5px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.tavern-regex-rule-id{display:block;margin-top:10px;overflow:hidden;color:#9098a1;font:7.5px/1.3 ui-monospace,SFMono-Regular,Consolas,monospace;text-overflow:ellipsis;white-space:nowrap}.tavern-regex-boundary{margin-top:12px;border-left:3px solid #d69a34;border-radius:0 8px 8px 0;padding:9px 10px;background:#fff9ee}.tavern-regex-boundary strong{color:#684814;font-size:9px}.tavern-regex-boundary p{margin:4px 0 0;color:#806333;font-size:8.5px;line-height:1.55}.tavern-regex-evidence{padding-bottom:48px}.tavern-regex-evidence-summary{border-bottom:1px solid #e1e6eb;padding:14px 16px;background:#fff}.tavern-regex-evidence-summary>header,.tavern-regex-match-section>header{display:flex;align-items:center;justify-content:space-between;gap:10px}.tavern-regex-evidence-summary>header>div,.tavern-regex-match-section>header>div{display:flex;min-width:0;flex-direction:column;gap:3px}.tavern-regex-evidence-summary>header strong,.tavern-regex-match-section>header strong{font-size:11px}.tavern-regex-evidence-summary>header span,.tavern-regex-match-section>header span{color:#7d858f;font-size:8px}.tavern-regex-plane-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:11px}.tavern-regex-plane-grid>article{display:flex;min-width:0;flex-direction:column;gap:3px;border:1px solid #e2e7ec;border-radius:8px;padding:9px;background:#fafbfc}.tavern-regex-plane-grid>article.is-active{border-color:#aac7ec;background:#f1f7ff}.tavern-regex-plane-grid span{color:#7c858f;font-size:7.5px}.tavern-regex-plane-grid strong{overflow:hidden;color:#343b43;font-size:9px;text-overflow:ellipsis;white-space:nowrap}.tavern-regex-plane-grid small{color:#8b939c;font-size:7.5px}.tavern-regex-evidence-summary>p{margin:10px 0 0;color:#69737d;font-size:8.5px;line-height:1.55}.tavern-regex-match-section{padding:14px}.tavern-regex-match-section>.tavern-regex-matches{padding:10px 0 0}.tavern-regex-matches>article{background:#fff;box-shadow:0 1px 2px #182a4210}.tavern-regex-matches>article>header{padding:8px 10px}.tavern-regex-matches>article>header span{color:#7f8892}.tavern-regex-matches pre{font-size:8.5px;line-height:1.6}
 .tavern-card-profile{padding:14px 16px 48px}.tavern-card-profile section{margin-bottom:20px}.tavern-card-profile p{color:#343a41;font-size:11px}.tavern-opening-documents{padding:12px 14px}.tavern-opening-documents article{margin-bottom:10px;border:1px solid #dfe3e8;border-radius:8px;overflow:hidden}.tavern-opening-documents header{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #e5e7ea;padding:8px 10px;background:#f7f8fa}.tavern-opening-documents header strong{font-size:10px}.tavern-opening-documents header span{color:#2d6cc7;font-size:8px}.tavern-opening-documents p{margin:0;padding:11px;color:#343a41;font-size:11px;line-height:1.7;white-space:pre-wrap}.tavern-compatibility-list{padding:12px 14px}.tavern-compatibility-list>section,.tavern-compatibility-list>article{margin-bottom:8px;border:1px solid #dfe3e8;border-radius:8px;padding:10px}.tavern-compatibility-list>section.is-ready{border-left:3px solid #25a45b}.tavern-compatibility-list>section.is-degraded{border-left:3px solid #e3a52b}.tavern-compatibility-list>section.is-blocked{border-left:3px solid #c94d59}.tavern-compatibility-list header{display:flex;align-items:center;justify-content:space-between;gap:8px}.tavern-compatibility-list strong{font-size:10px}.tavern-compatibility-list span{color:#6e7781;font-size:8px}.tavern-compatibility-list p{margin:5px 0 0;color:#606a75;font-size:9px;line-height:1.5}.tavern-capability-boundary{border-left:3px solid #e3a52b;padding:9px 10px;background:#fffaf0}.tavern-capability-boundary strong{font-size:10px}
 @media(max-width:1050px){:root{--tavern-capability-panel-width:440px}body:has(.tavern-capability-panel.is-open[data-capability="preset"]){--tavern-capability-panel-width:calc(100vw - var(--tavern-capability-rail-width))}.tavern-worldbook-workbench{grid-template-columns:180px minmax(0,1fr)}.tavern-regex-workbench{grid-template-columns:155px minmax(0,1fr)}.tavern-preset-toolbar{align-items:stretch;flex-direction:column}.tavern-preset-select-wrap{width:100%}.tavern-preset-actions{justify-content:flex-start}}@media(max-width:760px){:root{--tavern-capability-panel-width:calc(100vw - var(--tavern-capability-rail-width))}body:has(.tavern-card-capability-rail){padding-right:var(--tavern-capability-rail-width)}.tavern-capability-panel{box-shadow:-16px 0 40px #0002}.tavern-worldbook-workbench{grid-template-columns:170px minmax(0,1fr)}.tavern-regex-workbench{grid-template-columns:145px minmax(0,1fr)}.tavern-preset-budget-grid,.tavern-preset-samplers,.tavern-preset-prompt-layout{grid-template-columns:1fr}.tavern-preset-prompt-list{max-height:360px;border-right:0;border-bottom:1px solid #e1e5e9}.tavern-preset-select-wrap{min-width:0;grid-template-columns:1fr}.tavern-preset-select-wrap>label{grid-column:auto}.tavern-preset-binding{grid-template-columns:1fr}.tavern-preset-generation>header{align-items:flex-start;flex-direction:column}}
-.tavern-preset-advanced{margin:12px 16px 0;border:1px solid #dfe4e9;border-radius:9px;background:#fff;box-shadow:0 1px 2px #182a4210}.tavern-preset-advanced>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;color:#4f5964;cursor:pointer;list-style:none}.tavern-preset-advanced>summary::-webkit-details-marker{display:none}.tavern-preset-advanced>summary::after{width:6px;height:6px;flex:none;border-right:1.5px solid #7b8590;border-bottom:1.5px solid #7b8590;content:"";transform:rotate(45deg);transition:transform .15s ease}.tavern-preset-advanced[open]>summary::after{transform:rotate(225deg)}.tavern-preset-advanced>summary strong{font-size:10px}.tavern-preset-advanced>summary span{margin-left:auto;color:#818a94;font-size:8px}.tavern-preset-advanced-body{border-top:1px solid #e6e9ed;padding:12px}.tavern-preset-advanced-body>p{margin:0;color:#737d88;font-size:8.5px;line-height:1.55}.tavern-preset-advanced-body .tavern-preset-samplers{margin-top:11px}.tavern-preset-reset-sampling{margin-top:12px;border:1px solid #ced9e7;border-radius:7px;padding:6px 9px;background:#f7faff;color:#3168aa;cursor:pointer;font-size:8.5px;font-weight:600}
+.tavern-preset-advanced{margin:12px 16px 0;border:1px solid #dfe4e9;border-radius:9px;background:#fff;box-shadow:0 1px 2px #182a4210}.tavern-preset-advanced>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;color:#4f5964;cursor:pointer;list-style:none}.tavern-preset-advanced>summary::-webkit-details-marker{display:none}.tavern-preset-advanced>summary::after{width:6px;height:6px;flex:none;border-right:1.5px solid #7b8590;border-bottom:1.5px solid #7b8590;content:"";transform:rotate(45deg);transition:transform .15s ease}.tavern-preset-advanced[open]>summary::after{transform:rotate(225deg)}.tavern-preset-advanced>summary strong{font-size:10px}.tavern-preset-advanced-body{display:flex;align-items:flex-end;gap:10px;border-top:1px solid #e6e9ed;padding:10px 12px}.tavern-preset-advanced-body .tavern-preset-samplers{min-width:0;flex:1;margin:0;border:0;padding:0;grid-template-columns:repeat(2,minmax(0,1fr))}.tavern-preset-reset-sampling{height:30px;flex:none;margin:0;border:1px solid #ced9e7;border-radius:7px;padding:0 9px;background:#f7faff;color:#3168aa;cursor:pointer;font-size:8.5px;font-weight:600}
 .tavern-preset-workbench{display:flex;overflow:hidden;padding:0;flex-direction:column;background:#f7f8fa}.tavern-preset-toolbar{position:relative;z-index:5;align-items:center;gap:10px;padding:10px 14px}.tavern-preset-select-wrap{display:flex;min-width:0;align-items:center;gap:8px}.tavern-preset-select-wrap select{width:min(330px,55%);height:34px}.tavern-preset-revision{overflow:hidden;border:1px solid #dfe4e9;border-radius:6px;padding:6px 8px;background:#f6f7f9;color:#6f7882;font-size:8px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}.tavern-preset-revision.is-dirty{border-color:#d5b66f;background:#fff9ea;color:#8a6319}.tavern-preset-actions{position:relative;flex:none;flex-wrap:nowrap}.tavern-preset-actions>button,.tavern-preset-more>summary{display:inline-flex;height:34px;box-sizing:border-box;align-items:center;justify-content:center;gap:5px;border:1px solid #ccd4dd;border-radius:7px;padding:0 11px;background:#fff;color:#44505d;cursor:pointer;font-size:9px;font-weight:650;list-style:none}.tavern-preset-actions .is-primary,.tavern-preset-editor-footer .is-primary{border-color:#2f73ca;background:#3278d3;color:#fff}.tavern-preset-actions .is-primary:hover:not(:disabled),.tavern-preset-editor-footer .is-primary:hover:not(:disabled){border-color:#245fae;background:#2869be;color:#fff}.tavern-preset-more{position:relative}.tavern-preset-more>summary{width:34px;padding:0}.tavern-preset-more>summary::-webkit-details-marker{display:none}.tavern-preset-menu{position:absolute;z-index:10;top:39px;right:0;display:flex;width:138px;overflow:hidden;flex-direction:column;border:1px solid #d7dde4;border-radius:8px;padding:5px;background:#fff;box-shadow:0 10px 26px #182a4224}.tavern-preset-menu button,.tavern-preset-menu a{display:flex;height:32px;align-items:center;gap:8px;border:0;border-radius:5px;padding:0 9px;background:transparent;color:#3f4852;cursor:pointer;font-size:9px;font-weight:550;text-decoration:none}.tavern-preset-menu button:hover:not(:disabled),.tavern-preset-menu a:hover{background:#f0f5fc;color:#2468be}.tavern-preset-menu .is-danger{color:#a7444d}.tavern-preset-rename{display:flex;align-items:flex-end;gap:7px;border-bottom:1px solid #e1e5ea;padding:8px 14px;background:#fbfcfd}.tavern-preset-rename label{display:flex;min-width:0;flex:1;flex-direction:column;gap:4px;color:#6f7882;font-size:8px;font-weight:650}.tavern-preset-rename input{height:31px;border:1px solid #a9c4e7;border-radius:7px;padding:0 9px;background:#fff;outline:none;box-shadow:0 0 0 2px #357bd512}.tavern-preset-rename button{height:31px;border:1px solid #d0d7df;border-radius:7px;padding:0 9px;background:#fff;color:#45515e;cursor:pointer;font-size:8.5px}.tavern-preset-binding{grid-template-columns:auto minmax(0,1fr);padding:7px 14px}.tavern-preset-notice,.tavern-preset-error{padding:7px 14px}.tavern-preset-advanced{flex:none;margin:8px 14px 0;border-radius:7px;box-shadow:none}.tavern-preset-advanced>summary{padding:9px 11px}.tavern-preset-prompts{display:grid;min-height:0;flex:1;grid-template-columns:216px minmax(0,1fr);overflow:hidden;margin:8px 14px 14px;border-radius:8px;box-shadow:none}.tavern-preset-prompt-nav{display:flex;min-width:0;min-height:0;overflow:hidden;flex-direction:column;border-right:1px solid #e0e5ea;background:#fbfcfd}.tavern-preset-prompt-nav>header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:13px 12px 8px}.tavern-preset-prompt-nav h3{font-size:12px}.tavern-preset-prompt-nav>header button{display:grid;width:28px;height:28px;flex:none;place-items:center;border:1px solid #d2d9e1;border-radius:7px;background:#fff;color:#4f5b68;cursor:pointer}.tavern-preset-search{display:flex;height:31px;box-sizing:border-box;align-items:center;gap:6px;margin:0 10px;border:1px solid #d9dfe6;border-radius:7px;padding:0 8px;background:#fff;color:#8a939d}.tavern-preset-search input{width:100%;height:auto;border:0;padding:0;background:transparent;color:#343c45;font-size:8.5px;outline:none}.tavern-preset-prompt-tabs{display:grid;grid-template-columns:repeat(2,1fr);margin:8px 10px 0;border-bottom:1px solid #dfe4e9}.tavern-preset-prompt-tabs button{position:relative;height:31px;border:0;background:transparent;color:#747d87;cursor:pointer;font-size:9px;font-weight:650}.tavern-preset-prompt-tabs button.is-active{color:#2368bd}.tavern-preset-prompt-tabs button.is-active::after{position:absolute;right:0;bottom:-1px;left:0;height:2px;background:#3278d3;content:""}.tavern-preset-prompt-tabs span{margin-left:3px;color:#929aa3;font-size:7px}.tavern-preset-prompt-list,.tavern-preset-library-list{min-height:0;max-height:none;overflow:auto;border:0;background:#fbfcfd}.tavern-preset-prompt-list article{min-height:47px;grid-template-columns:23px minmax(0,1fr) 30px 22px;gap:3px;padding:4px 6px;background:#fbfcfd}.tavern-preset-prompt-list article.is-selected{background:#edf5ff}.tavern-preset-prompt-main{gap:2px;padding:4px 2px}.tavern-preset-prompt-main strong{font-size:9px}.tavern-preset-prompt-main small{font-size:7px}.tavern-preset-row-toggle{position:relative!important;display:block!important;width:28px!important;height:16px!important;border:0!important;border-radius:999px!important;background:transparent!important}.tavern-preset-row-toggle input,.tavern-preset-editor-toggle input{position:absolute;width:1px;height:1px;opacity:0}.tavern-preset-row-toggle>span,.tavern-preset-editor-toggle>span{position:relative;display:block!important;width:28px!important;height:16px!important;border:0!important;border-radius:999px!important;background:#c9d0d8!important;transition:background .15s ease}.tavern-preset-row-toggle>span::after,.tavern-preset-editor-toggle>span::after{position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:#fff;box-shadow:0 1px 2px #0003;content:"";transition:transform .15s ease}.tavern-preset-row-toggle:has(input:checked)>span,.tavern-preset-editor-toggle:has(input:checked)>span{background:#3278d3!important}.tavern-preset-row-toggle:has(input:checked)>span::after,.tavern-preset-editor-toggle:has(input:checked)>span::after{transform:translateX(12px)}.tavern-preset-move{gap:0}.tavern-preset-move button{width:20px;height:20px}.tavern-preset-move button:first-child svg{transform:rotate(90deg)}.tavern-preset-move button:last-child svg{transform:rotate(90deg)}.tavern-preset-library-list article{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;border-bottom:1px solid #e5e9ed;padding:5px 7px}.tavern-preset-library-list article.is-selected{background:#edf5ff}.tavern-preset-library-list article>button:first-child{display:flex;min-width:0;flex-direction:column;gap:2px;border:0;padding:7px 4px;background:transparent;color:#39424c;cursor:pointer;text-align:left}.tavern-preset-library-list strong,.tavern-preset-library-list small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tavern-preset-library-list strong{font-size:9px}.tavern-preset-library-list small{color:#818a94;font-size:7px}.tavern-preset-insert{border:1px solid #cbd7e6;border-radius:6px;padding:5px 7px;background:#fff;color:#3169aa;cursor:pointer;font-size:8px}.tavern-preset-list-empty{margin:0;padding:24px 12px;color:#8a939d;font-size:8.5px;text-align:center}.tavern-preset-prompt-editor{position:relative;display:flex;min-width:0;min-height:0;overflow:auto;flex-direction:column;padding:16px 18px 64px;background:#fff}.tavern-preset-prompt-editor>header{align-items:center;margin-bottom:18px}.tavern-preset-prompt-editor>header strong{font-size:16px;line-height:1.25}.tavern-preset-editor-actions{display:flex;align-items:center;gap:5px}.tavern-preset-editor-actions>button{display:grid;width:29px;height:29px;place-items:center;border:1px solid #d4dae1;border-radius:7px;background:#fff;color:#56616d;cursor:pointer}.tavern-preset-editor-actions>button:disabled{cursor:not-allowed;opacity:.35}.tavern-preset-editor-toggle{display:flex;align-items:center;gap:5px;margin:0 5px 0 0!important;color:#66717c!important;font-size:8px!important}.tavern-preset-prompt-editor>label,.tavern-preset-editor-grid label,.tavern-preset-content{font-size:9px}.tavern-preset-prompt-editor input,.tavern-preset-prompt-editor select{height:35px;font-size:9.5px}.tavern-preset-editor-grid{gap:11px;margin-top:12px}.tavern-preset-content{min-height:210px;flex:1;margin-top:14px}.tavern-preset-content>span{display:flex;align-items:baseline;justify-content:space-between}.tavern-preset-content>span small{color:#8b949e;font-size:7.5px;font-weight:500}.tavern-preset-prompt-editor textarea{min-height:190px;flex:1;resize:none;padding:12px;background:#fff;font:9px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace}.tavern-preset-marker-note{margin-top:14px}.tavern-preset-editor-more{margin-top:14px;border-top:1px solid #e4e8ed}.tavern-preset-editor-more>summary{padding:11px 2px;color:#59646f;cursor:pointer;font-size:8.5px;font-weight:650}.tavern-preset-editor-more>div{padding-bottom:8px}.tavern-preset-card-overrides{margin:4px 0 0;box-shadow:none}.tavern-preset-editor-footer{position:absolute;right:0;bottom:0;left:0;display:flex;height:52px;box-sizing:border-box;align-items:center;justify-content:flex-end;gap:7px;border-top:1px solid #e0e5ea;padding:9px 14px;background:#fff}.tavern-preset-editor-footer>span{margin-right:auto;color:#7e8791;font-size:8px}.tavern-preset-editor-footer>span.is-dirty{color:#996c18}.tavern-preset-editor-footer>button{height:31px;border:1px solid #d0d7df;border-radius:7px;padding:0 10px;background:#fff;color:#45515e;cursor:pointer;font-size:8.5px;font-weight:650}.tavern-preset-editor-footer>button:disabled{cursor:not-allowed;opacity:.45}
 .tavern-preset-search{height:38px;flex:none;gap:7px;border-radius:8px;padding:0 10px;color:#7e8893}.tavern-preset-search input{font-size:11px}.tavern-preset-prompt-tabs{flex:none}.tavern-preset-prompt-tabs button{height:38px;font-size:11.5px}.tavern-preset-prompt-tabs span{font-size:9.5px}.tavern-preset-prompt-main strong{font-size:10.5px}.tavern-preset-prompt-main small{font-size:8px}.tavern-preset-row-toggle>span,.tavern-preset-editor-toggle>span{transform:none!important}.tavern-preset-prompt-editor textarea{font-family:inherit;font-size:12px;line-height:1.7}
 .tavern-preset-prompt-nav{position:relative}.tavern-preset-prompt-nav>header .tavern-preset-add-trigger{display:flex;width:auto;height:30px;gap:4px;padding:0 8px;font-size:9.5px;font-weight:650}.tavern-preset-prompt-list{margin-top:8px;border-top:1px solid #e1e5ea}.tavern-preset-add-popover{position:absolute;z-index:6;top:54px;right:8px;left:8px;display:flex;max-height:calc(100% - 62px);box-sizing:border-box;overflow:hidden;flex-direction:column;border:1px solid #ced6df;border-radius:9px;padding:8px;background:#fff;box-shadow:0 10px 28px #182a4230}.tavern-preset-add-popover>header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:2px 2px 8px}.tavern-preset-add-popover>header>div{display:flex;min-width:0;flex-direction:column;gap:2px}.tavern-preset-add-popover>header strong{font-size:10.5px}.tavern-preset-add-popover>header span{color:#7e8791;font-size:8px}.tavern-preset-add-popover>header>button{display:grid;width:25px;height:25px;flex:none;place-items:center;border:0;border-radius:6px;background:transparent;color:#65717d;cursor:pointer}.tavern-preset-create-prompt{display:flex;min-height:42px;flex:none;align-items:center;gap:8px;border:1px solid #c9d8ea;border-radius:7px;padding:6px 9px;background:#f4f8fe;color:#2868b8;cursor:pointer;text-align:left}.tavern-preset-create-prompt>span{display:flex;min-width:0;flex-direction:column;gap:2px}.tavern-preset-create-prompt strong{font-size:9.5px}.tavern-preset-create-prompt small{color:#6f7d8d;font-size:7.5px}.tavern-preset-unused-search{display:flex;height:34px;flex:none;align-items:center;gap:6px;margin-top:8px;border:1px solid #d8dfe6;border-radius:7px;padding:0 8px;color:#828c97}.tavern-preset-unused-search input{width:100%;min-width:0;border:0;background:transparent;color:#343c45;font-size:9.5px;outline:none}.tavern-preset-unused-list{min-height:0;overflow:auto;margin-top:6px;border-top:1px solid #edf0f3}.tavern-preset-unused-list>button{display:flex;width:100%;align-items:center;justify-content:space-between;gap:7px;border:0;border-bottom:1px solid #edf0f3;padding:8px 4px;background:#fff;color:#343d47;cursor:pointer;text-align:left}.tavern-preset-unused-list>button:hover{background:#f3f7fc}.tavern-preset-unused-list>button>span{display:flex;min-width:0;flex-direction:column;gap:2px}.tavern-preset-unused-list strong,.tavern-preset-unused-list small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tavern-preset-unused-list strong{font-size:9.5px}.tavern-preset-unused-list small{color:#7d8791;font-size:7.5px}.tavern-preset-unused-list em{flex:none;color:#2d6fc3;font-size:8px;font-style:normal;font-weight:650}
@@ -2455,28 +2458,154 @@ body:has(.tavern-capability-panel[data-capability="preset"]){--tavern-capability
 .tavern-frontend-overview-copy>span{font-size:10px}.tavern-frontend-overview-copy>strong{font-size:17px}.tavern-frontend-overview-copy>small{font-size:10px}.tavern-frontend-overview-facts strong{font-size:15px}.tavern-frontend-overview-facts span{font-size:9px}.tavern-frontend-setting-section>summary strong{font-size:12px}.tavern-frontend-setting-section>summary span{font-size:9px}.tavern-frontend-facts{font-size:10px}.tavern-frontend-facts dt,.tavern-frontend-facts dd{padding:9px 4px}.tavern-frontend-permission strong{font-size:11px}.tavern-frontend-permission small{font-size:9.5px}.tavern-frontend-note,.tavern-frontend-empty,.tavern-frontend-resource p{font-size:10px}.tavern-frontend-metrics span{font-size:9px}.tavern-frontend-metrics strong{font-size:15px}.tavern-frontend-setting-body h4{font-size:9px}.tavern-frontend-script>summary strong{font-size:10px}.tavern-frontend-script>summary span{font-size:9px}.tavern-frontend-state>summary{font-size:10px}
 `;
 
+    const CONTROL_STYLE = `
+.dsh-roleplay-control{width:100%;box-sizing:border-box;list-style:none;border:1px solid var(--dsw-alias-border-l2,#e1e5ea);border-radius:12px;background:var(--dsw-alias-bg-layer-3,#fff);color:var(--dsw-alias-label-primary,#20242a);transition:border-color .16s,background .16s}.dsh-roleplay-control:hover{border-color:var(--dsw-alias-label-dimmed,#a8afb8)}.dsh-roleplay-control.is-open{border-color:var(--dsw-alias-label-dimmed,#a8afb8);background:var(--dsw-alias-bg-layer-2,#fafbfc)}
+.dsh-roleplay-control-header{display:flex;width:100%;box-sizing:border-box;appearance:none;align-items:center;gap:12px;border:0;border-radius:12px;padding:14px 16px;background:transparent;color:inherit;cursor:pointer;font:inherit;text-align:left}.dsh-roleplay-control-header:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#2877eb);outline-offset:-2px}.dsh-roleplay-control-heading{display:flex;min-width:0;flex:1;flex-direction:column;gap:4px}.dsh-roleplay-control-heading strong{color:var(--dsw-alias-label-primary,#20242a);font-size:15px;font-weight:600;line-height:1.4}.dsh-roleplay-control-heading span{color:var(--dsw-alias-label-tertiary,#838b95);font-size:13px;line-height:1.5}.dsh-roleplay-control-chevron{flex:none;color:var(--dsw-alias-label-tertiary,#838b95);transition:transform .16s}.dsh-roleplay-control.is-open .dsh-roleplay-control-chevron{transform:rotate(180deg)}
+.dsh-roleplay-control-body{margin:0 16px;border-top:1px solid var(--dsw-alias-border-l2,#e1e5ea);padding:14px 0 12px}.dsh-roleplay-control-row{display:flex;align-items:flex-start;justify-content:space-between;gap:24px}.dsh-roleplay-control-copy{min-width:0}.dsh-roleplay-control-copy strong{font-size:13px;line-height:1.5}.dsh-roleplay-control-copy p{max-width:520px;margin:5px 0 0;color:var(--dsw-alias-label-secondary,#68717c);font-size:12px;line-height:1.6}.dsh-roleplay-control-toggle{display:flex;flex:none;align-items:center;gap:9px;margin-top:1px;font-size:13px;font-weight:650;cursor:pointer}.dsh-roleplay-control-toggle input{width:18px;height:18px;accent-color:var(--dsw-alias-brand-primary,#2877eb)}.dsh-roleplay-control-note{display:block;margin-top:14px;border-top:1px solid var(--dsw-alias-border-l2,#e1e5ea);padding-top:12px;color:var(--dsw-alias-label-tertiary,#838b95);font-size:12px;line-height:1.55}.dsh-roleplay-control [role=alert]{margin:10px 0 0;color:var(--dsw-alias-label-error,#b43e49);font-size:12px}
+`;
+
     module.exports.inject = ["slots", "sessions"];
     module.exports.apply = (ctx: any): (() => void) => {
-      runtimeContext = ctx;
-      void refreshHostCards().catch((error) => patchState({ startError: error instanceof Error ? error.message : "无法读取已保存的酒馆卡" }));
-      const disposers: Array<() => void> = [];
+      const controlDisposers: Array<() => void> = [];
+      let runtimeDispose: (() => void) | null = null;
+      let lastRolePlaySessionId: string | null = null;
+      let sessionRecovery: Promise<"ready" | "reloaded" | "missing"> | null = null;
+
+      const currentRolePlaySessionId = (): string | null => {
+        const current = ctx.sessions.list.getSnapshot().current as string | undefined;
+        if (current === undefined) return null;
+        if (state.activeSessionId === current) return current;
+        return state.cards.some((card) => card.sessions.some((save) => save.sessionId === current)) ? current : null;
+      };
+
+      const recoverCurrentRolePlaySession = (): Promise<"ready" | "reloaded" | "missing"> | null => {
+        const sessionId = currentRolePlaySessionId() ?? lastRolePlaySessionId;
+        if (sessionId === null) return null;
+        if (sessionRecovery !== null) return sessionRecovery;
+        sessionRecovery = recoverRestoredClientSession(ctx.sessions, {
+          sessionId,
+          reload: () => window.location.reload(),
+        }).then((result) => {
+          if (result === "ready") lastRolePlaySessionId = null;
+          return result;
+        }).finally(() => { sessionRecovery = null; });
+        return sessionRecovery;
+      };
+
+      const startRuntime = (): void => {
+        if (runtimeDispose !== null) return;
+        runtimeContext = ctx;
+        void refreshHostCards()
+          .then(() => recoverCurrentRolePlaySession())
+          .catch((error) => patchState({ startError: error instanceof Error ? error.message : "无法读取已保存的酒馆卡" }));
+        const disposers: Array<() => void> = [];
+        if (typeof document !== "undefined") {
+          const style = document.createElement("style");
+          style.dataset.plugin = "dsh-roleplay-runtime";
+          style.textContent = `${STYLE}\n${FRONTEND_CALL_STYLE}`;
+          document.head.appendChild(style);
+          disposers.push(() => style.remove());
+        }
+        disposers.push(ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({ name: "sidebar.footer.action", id: "dsh-roleplay-integration", order: 15 }, SidebarIntegration)));
+        disposers.push(ctx.slots.inject("conversation.view", () => ctx.slots.register({ name: "conversation.view", id: "tavern", order: 30, label: () => "酒馆" }, TavernContextView)));
+        disposers.push(ctx.slots.inject("conversation.composer.dock", () => ctx.slots.register({ name: "conversation.composer.dock", id: "dsh-roleplay-native-message-adapter", order: 90 }, TavernNativeMessageAdapter)));
+        disposers.push(ctx.slots.inject("conversation.input.dock", () => ctx.slots.register({ name: "conversation.input.dock", id: "dsh-roleplay-trajectory-surface-adapter", order: 19 }, TavernTrajectorySurfaceAdapter)));
+        disposers.push(ctx.slots.inject("conversation.input.dock", () => ctx.slots.register({ name: "conversation.input.dock", id: "dsh-roleplay-opening-switcher", order: 20 }, TavernOpeningSwitcher)));
+        runtimeDispose = () => {
+          const failures: unknown[] = [];
+          lastRolePlaySessionId = currentRolePlaySessionId() ?? lastRolePlaySessionId;
+          for (const dispose of disposers.reverse()) {
+            try { dispose(); } catch (error) { failures.push(error); }
+          }
+          listeners.clear();
+          state = initialState();
+          runtimeContext = null;
+          runtimeDispose = null;
+          if (failures.length === 1) throw failures[0];
+          if (failures.length > 1) throw new AggregateError(failures, "RolePlay 客户端运行时卸载失败");
+        };
+      };
+
+      const syncRuntime = (enabled: boolean): void => {
+        if (enabled) startRuntime();
+        else runtimeDispose?.();
+      };
+
+      const RolePlaySettingsCard = (): any => {
+        const [open, setOpen] = React.useState(false);
+        const [enabled, setEnabled] = React.useState(null as boolean | null);
+        const [busy, setBusy] = React.useState(false);
+        const [error, setError] = React.useState("");
+        const read = async (): Promise<void> => {
+          const response = await fetch("/dsh-re3-rp/control", { cache: "no-store" });
+          const body = await response.json();
+          if (!response.ok || body.ok !== true) throw new Error(body.error || "无法读取插件状态");
+          setEnabled(body.enabled === true);
+          syncRuntime(body.enabled === true);
+        };
+        React.useEffect(() => { void read().catch((reason) => setError(reason instanceof Error ? reason.message : String(reason))); }, []);
+        const update = async (next: boolean): Promise<void> => {
+          setBusy(true);
+          setError("");
+          try {
+            const response = await fetch("/dsh-re3-rp/control", {
+              method: "POST",
+              headers: { "content-type": "application/json; charset=utf-8" },
+              body: JSON.stringify({ enabled: next }),
+            });
+            const body = await response.json();
+            if (!response.ok || body.ok !== true) throw new Error(body.error || "无法切换插件状态");
+            setEnabled(body.enabled === true);
+            syncRuntime(body.enabled === true);
+          } catch (reason) {
+            setError(reason instanceof Error ? reason.message : String(reason));
+          } finally {
+            setBusy(false);
+          }
+        };
+        return h("li", { className: `dsh-roleplay-control${open ? " is-open" : ""}` },
+          h("button", { type: "button", className: "dsh-roleplay-control-header", "aria-expanded": open, onClick: () => setOpen(!open) },
+            h("span", { className: "dsh-roleplay-control-heading" },
+              h("strong", null, "DSH RolePlay"),
+              h("span", null, "管理酒馆体验与运行时扩展。"),
+            ),
+            h(IconChevronDownOutline14, { className: "dsh-roleplay-control-chevron", size: 14 }),
+          ),
+          open ? h("div", { className: "dsh-roleplay-control-body" },
+            h("div", { className: "dsh-roleplay-control-row" },
+              h("div", { className: "dsh-roleplay-control-copy" },
+                h("strong", null, "启用 DSH RolePlay"),
+                h("p", null, "关闭后会卸载酒馆侧栏、对话适配、输入区扩展、Host 路由和运行时资源。角色卡与 Session 数据会保留，重新开启即可恢复。"),
+              ),
+              h("label", { className: "dsh-roleplay-control-toggle" },
+                h("input", { type: "checkbox", checked: enabled === true, disabled: enabled === null || busy, onChange: (event: any) => { void update(event.currentTarget.checked); } }),
+                busy ? "切换中…" : enabled === true ? "已开启" : "已关闭",
+              ),
+            ),
+            error.length > 0 ? h("div", { role: "alert" }, error) : null,
+            h("small", { className: "dsh-roleplay-control-note" }, "这里的关闭是可逆的运行时卸载；如需从磁盘删除 npm 包，请使用 DSH 的插件移除命令。"),
+          ) : null,
+        );
+      };
+
       if (typeof document !== "undefined") {
         const style = document.createElement("style");
-        style.dataset.plugin = "dsh-roleplay";
-        style.textContent = `${STYLE}\n${FRONTEND_CALL_STYLE}`;
+        style.dataset.plugin = "dsh-roleplay-control";
+        style.textContent = CONTROL_STYLE;
         document.head.appendChild(style);
-        disposers.push(() => style.remove());
+        controlDisposers.push(() => style.remove());
       }
-      disposers.push(ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({ name: "sidebar.footer.action", id: "dsh-roleplay-integration", order: 15 }, SidebarIntegration)));
-      disposers.push(ctx.slots.inject("conversation.view", () => ctx.slots.register({ name: "conversation.view", id: "tavern", order: 30, label: () => "酒馆" }, TavernContextView)));
-      disposers.push(ctx.slots.inject("conversation.composer.dock", () => ctx.slots.register({ name: "conversation.composer.dock", id: "dsh-roleplay-native-message-adapter", order: 90 }, TavernNativeMessageAdapter)));
-      disposers.push(ctx.slots.inject("conversation.input.dock", () => ctx.slots.register({ name: "conversation.input.dock", id: "dsh-roleplay-trajectory-surface-adapter", order: 19 }, TavernTrajectorySurfaceAdapter)));
-      disposers.push(ctx.slots.inject("conversation.input.dock", () => ctx.slots.register({ name: "conversation.input.dock", id: "dsh-roleplay-opening-switcher", order: 20 }, TavernOpeningSwitcher)));
+      controlDisposers.push(ctx.slots.inject("settings.plugin.item", () => ctx.slots.register({ name: "settings.plugin.item", key: "dsh-roleplay" }, RolePlaySettingsCard)));
+      void fetch("/dsh-re3-rp/control", { cache: "no-store" })
+        .then(async (response) => ({ response, body: await response.json() }))
+        .then(({ response, body }) => {
+          if (!response.ok || body.ok !== true) throw new Error(body.error || "无法读取插件状态");
+          syncRuntime(body.enabled === true);
+        })
+        .catch((error) => patchState({ startError: error instanceof Error ? error.message : "无法读取插件状态" }));
       return () => {
-        for (const dispose of disposers.reverse()) dispose();
-        listeners.clear();
-        state = initialState();
-        runtimeContext = null;
+        runtimeDispose?.();
+        for (const dispose of controlDisposers.reverse()) dispose();
       };
     };
     return module.exports;

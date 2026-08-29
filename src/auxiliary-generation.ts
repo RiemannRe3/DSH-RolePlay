@@ -72,7 +72,7 @@ export function applyTavernHelperGenerateInjections(compiled: CompiledTavernProm
       characterCount: messages.reduce((sum, message) => sum + message.content.length, 0),
       estimatedTokens: messages.reduce((sum, message) => sum + Math.ceil(message.content.length / 4) + 4, 0),
       depthInjections: compiled.stats.depthInjections + config.injects.length,
-      contextExceeded: messages.reduce((sum, message) => sum + Math.ceil(message.content.length / 4) + 4, 0) > compiled.stats.contextTokens,
+      contextExceeded: compiled.stats.contextTokens !== null && messages.reduce((sum, message) => sum + Math.ceil(message.content.length / 4) + 4, 0) > compiled.stats.contextTokens,
     },
   };
 }

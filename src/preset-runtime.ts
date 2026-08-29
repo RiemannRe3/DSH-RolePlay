@@ -14,8 +14,8 @@ export type TavernPromptMarker =
   | "post-history-instructions";
 
 export type TavernGenerationSettings = {
-  contextTokens: number;
-  maxReplyTokens: number;
+  contextTokens: number | null;
+  maxReplyTokens: number | null;
   stream: boolean;
   temperature: number;
   topP: number;
@@ -121,6 +121,12 @@ function integer(value: unknown, fallback: number, minimum: number, maximum = Nu
   return Math.min(maximum, Math.max(minimum, Math.round(finite(value, fallback))));
 }
 
+function optionalInteger(value: unknown, minimum: number, maximum = Number.MAX_SAFE_INTEGER): number | null {
+  if (value === undefined || value === null || value === "") return null;
+  const candidate = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(candidate) ? Math.min(maximum, Math.max(minimum, Math.round(candidate))) : null;
+}
+
 function role(value: unknown): WorldbookRole {
   return value === "user" ? "user" : value === "assistant" || value === "model" ? "assistant" : "system";
 }
@@ -207,8 +213,8 @@ export function normalizeTavernPreset(value: unknown, options: { id?: string; na
     updatedAt: iso(input.updatedAt, now),
     worldInfoFormat: typeof input.wi_format === "string" ? input.wi_format : typeof input.worldInfoFormat === "string" ? input.worldInfoFormat : "{0}",
     settings: {
-      contextTokens: integer(input.openai_max_context ?? record(input.settings).contextTokens, 4095, 256),
-      maxReplyTokens: integer(input.openai_max_tokens ?? record(input.settings).maxReplyTokens, 300, 1),
+      contextTokens: optionalInteger(input.openai_max_context ?? record(input.settings).contextTokens, 256),
+      maxReplyTokens: optionalInteger(input.openai_max_tokens ?? record(input.settings).maxReplyTokens, 1),
       stream: typeof input.stream_openai === "boolean" ? input.stream_openai : typeof record(input.settings).stream === "boolean" ? record(input.settings).stream as boolean : true,
       temperature: Math.min(5, Math.max(0, finite(input.temperature ?? record(input.settings).temperature, 1))),
       topP: Math.min(1, Math.max(0, finite(input.top_p ?? record(input.settings).topP, 1))),
@@ -224,13 +230,11 @@ export function normalizeTavernPreset(value: unknown, options: { id?: string; na
 
 export function createDefaultTavernPreset(now = "2026-08-26T00:00:00.000Z"): TavernPromptPreset {
   return normalizeTavernPreset({
-    name: "SillyTavern Default",
+    name: "DSH RolePlay Default",
     temperature: 1,
     frequency_penalty: 0,
     presence_penalty: 0,
     top_p: 1,
-    openai_max_context: 4095,
-    openai_max_tokens: 300,
     max_context_unlocked: false,
     wi_format: "{0}",
     stream_openai: true,
@@ -244,7 +248,7 @@ export function createDefaultTavernPreset(now = "2026-08-26T00:00:00.000Z"): Tav
     })),
     prompt_order: [{ character_id: 100001, order: DEFAULT_ORDER }],
     chat_completion_source: "openai",
-  }, { id: "sillytavern-default-1.18", source: "builtin", now });
+  }, { id: "dsh-roleplay-default-1", source: "builtin", now });
 }
 
 export const DEFAULT_TAVERN_PRESET = createDefaultTavernPreset();
@@ -257,8 +261,8 @@ export function exportSillyTavernPreset(preset: TavernPromptPreset): Record<stri
     frequency_penalty: preset.settings.frequencyPenalty,
     presence_penalty: preset.settings.presencePenalty,
     top_p: preset.settings.topP,
-    openai_max_context: preset.settings.contextTokens,
-    openai_max_tokens: preset.settings.maxReplyTokens,
+    ...(preset.settings.contextTokens === null ? {} : { openai_max_context: preset.settings.contextTokens }),
+    ...(preset.settings.maxReplyTokens === null ? {} : { openai_max_tokens: preset.settings.maxReplyTokens }),
     max_context_unlocked: preset.settings.maxContextUnlocked,
     wi_format: preset.worldInfoFormat,
     stream_openai: preset.settings.stream,

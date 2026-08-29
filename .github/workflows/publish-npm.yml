@@ -1,0 +1,54 @@
+name: Publish npm package
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    if: startsWith(github.event.release.tag_name, 'v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the released source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Node.js and npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.13.1
+          registry-url: https://registry.npmjs.org/
+          cache: npm
+
+      - name: Verify the release tag matches package.json
+        id: package
+        shell: bash
+        run: |
+          package_name="$(node --print "require('./package.json').name")"
+          package_version="$(node --print "require('./package.json').version")"
+          test "v${package_version}" = "${{ github.event.release.tag_name }}"
+          echo "name=${package_name}" >> "$GITHUB_OUTPUT"
+          echo "version=${package_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this version already exists
+        id: registry
+        shell: bash
+        run: |
+          if npm view "${{ steps.package.outputs.name }}@${{ steps.package.outputs.version }}" version --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install exact dependencies
+        if: steps.registry.outputs.published != 'true'
+        run: npm ci --legacy-peer-deps
+
+      - name: Publish the public scoped package
+        if: steps.registry.outputs.published != 'true'
+        run: npm publish --access public

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3 - 2026-08-29
+
+- 将 npm 包迁移为公开作用域包 `@riemannre3/dsh-roleplay`，避免未作用域包名冲突。
+- 改用标准 DSH Web Profile 安装命令，并增加可逆的设置开关：关闭时卸载酒馆运行时与界面，保留角色卡和 Session 数据。
+- 增加 npm Trusted Publisher 工作流，为首次人工发布后的 GitHub OIDC 自动发布做准备。
+
 ## 0.1.2 - 2026-08-27
 
 - 将公开包名、插件标识和新建消息来源统一为 `dsh-roleplay`。

@@ -1,4 +1,4 @@
 # DSH Re3 RP host runtime plus the accepted #101 sidebar adapter.
 - insert:
     - id: dsh-roleplay
-      name: 'dsh-roleplay'
+      name: '@riemannre3/dsh-roleplay'

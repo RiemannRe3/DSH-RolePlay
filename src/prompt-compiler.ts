@@ -48,7 +48,7 @@ export type CompiledTavernPrompt = {
     messageCount: number;
     characterCount: number;
     estimatedTokens: number;
-    contextTokens: number;
+    contextTokens: number | null;
     prunedChatMessages: number;
     prunedExampleMessages: number;
     contextExceeded: boolean;
@@ -146,7 +146,7 @@ function compileChatHistory(chat: readonly TavernChatMessage[], placement: World
 export function normalizeTavernChatMessages(messages: readonly any[]): TavernChatMessage[] {
   return messages.flatMap((message: any, sourceIndex: number): TavernChatMessage[] => {
     if (message?.role !== "user" && message?.role !== "assistant") return [];
-    if (message?.source?.kind === "plugin") return [];
+    if (message?.source?.kind === "plugin" && message.source.plugin !== "compact") return [];
     const content = typeof message.content === "string" ? message.content : Array.isArray(message.content) ? message.content.filter((part: any) => part?.type === "text" && typeof part.text === "string").map((part: any) => part.text).join("\n") : "";
     if (content.trim().length === 0 || /^\[DSH_RE3_RP_(?:WORLD_CONTEXT|ASSEMBLY)\]/u.test(content)) return [];
     return [{ role: message.role, content, sourceIndex }];
@@ -214,11 +214,12 @@ function markerMessages(input: {
   }
 }
 
-function trimToContext(messages: CompiledTavernMessage[], contextTokens: number): { messages: CompiledTavernMessage[]; prunedChatMessages: number; prunedExampleMessages: number; estimatedTokens: number; contextExceeded: boolean } {
+function trimToContext(messages: CompiledTavernMessage[], contextTokens: number | null): { messages: CompiledTavernMessage[]; prunedChatMessages: number; prunedExampleMessages: number; estimatedTokens: number; contextExceeded: boolean } {
   let current = messages;
   let estimatedTokens = current.reduce((sum, message) => sum + estimateMessageTokens(message), 0);
   let prunedChatMessages = 0;
   let prunedExampleMessages = 0;
+  if (contextTokens === null) return { messages: current, prunedChatMessages, prunedExampleMessages, estimatedTokens, contextExceeded: false };
   if (estimatedTokens > contextTokens) {
     const latestChatIndex = current.reduce((last, message, index) => message.source.kind === "chat" ? index : last, -1);
     const removable = current.flatMap((message, index) => message.source.kind === "chat" && index !== latestChatIndex ? [index] : []);
@@ -337,7 +338,7 @@ export function applyCompiledPromptToRequest(options: any, compiled: CompiledTav
   options.messages = messages;
   options.tools = [];
   options.temperature = compiled.settings.temperature;
-  options.maxTokens = compiled.settings.maxReplyTokens;
+  if (compiled.settings.maxReplyTokens !== null) options.maxTokens = compiled.settings.maxReplyTokens;
   options.tavernPresetRuntime = {
     presetId: compiled.preset.id,
     revision: compiled.preset.revision,

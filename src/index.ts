@@ -1,4 +1,6 @@
 import z from "zod";
+import Schema from "@deepseek-ai/schemastery";
+import { settingsNamespace } from "@deepseek-ai/dsh-settings";
 import { defineDomain, domainTable } from "@deepseek-ai/dsh-storage-domain";
 import { NORMALIZED_CARD_INDEX_VERSION, parseCard, sha256, type NormalizedCard } from "./card-runtime.js";
 import { activateWorldbookWithRenderer, normalizeWorldbookEntry, placeWorldbook, substituteCardMacros, type WorldbookActivation } from "./worldbook.js";
@@ -14,9 +16,13 @@ import { defaultMvuSessionSettings, normalizeMvuSessionSettings, replayMvuReplie
 import { personaBindingKey, personaBindingKeysToClearForSelection, renderPersonaPrompt, resolvePersona, validatePersonaDraft, type PersonaBindingRecord, type PersonaBindingScope, type PersonaRecord } from "./persona-runtime.js";
 import { applyTavernHelperGenerateInjections, generateScanText, normalizeTavernHelperGenerateConfig } from "./auxiliary-generation.js";
 import { hideCardFromLibrary, orderVisibleCards, preserveCardLibraryMetadata, reorderVisibleCards, restoreCardToLibrary, type CardLibraryRecord } from "./card-library.js";
+import { RolePlayLifecycle } from "./lifecycle.js";
 
 export const name = "dsh-roleplay";
-export const inject = ["webServer", "sessions", "sessionPersistence", "storageDomain", "agents", "agentDefaultModel", "llm"];
+export const inject = ["webServer", "sessions", "sessionPersistence", "storageDomain", "settings", "agents", "agentDefaultModel", "llm"];
+
+const rolePlaySettingsNamespace = settingsNamespace("dsh-roleplay");
+const rolePlaySettingsSchema = Schema.object({});
 
 type RecordValue = Record<string, unknown>;
 type Binding = {
@@ -298,7 +304,7 @@ function replaceOpening(session: any, text: string): void {
   });
 }
 
-export async function apply(ctx: any): Promise<() => Promise<void>> {
+async function applyRuntime(ctx: any): Promise<() => Promise<void>> {
   const verificationInstanceId = crypto.randomUUID();
   const hostGlobal = globalThis as unknown as { process: { cwd(): string; env: Record<string, string | undefined>; getBuiltinModule(id: string): any } };
   const fs = hostGlobal.process.getBuiltinModule("node:fs") as any;
@@ -308,6 +314,16 @@ export async function apply(ctx: any): Promise<() => Promise<void>> {
   // If the isolated renderer cannot load, the plugin fails closed instead of
   // claiming EJS compatibility while passing templates through to the model.
   const ejsRuntime = await createEjsRuntime();
+  const openedDomains: Array<{ close(): void | Promise<void> }> = [];
+  const disposeInfrastructure = async (): Promise<void> => {
+    const failures: unknown[] = [];
+    try { await ejsRuntime.dispose(); } catch (error) { failures.push(error); }
+    while (openedDomains.length > 0) {
+      try { await openedDomains.pop()!.close(); } catch (error) { failures.push(error); }
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "RolePlay 运行时资源卸载失败");
+  };
   try {
   const dshHome = hostGlobal.process.env.DSH_HOME;
   if (typeof dshHome !== "string" || dshHome.length === 0) throw new Error("dsh-roleplay 需要隔离的 DSH_HOME");
@@ -316,11 +332,22 @@ export async function apply(ctx: any): Promise<() => Promise<void>> {
   fs.mkdirSync(blobRoot, { recursive: true });
   fs.mkdirSync(frontendAssetRoot, { recursive: true });
 
-  const domain = await ctx.storageDomain.open(domainSpec);
+  let domain: any;
+  try {
+    domain = await ctx.storageDomain.open(domainSpec);
+  } catch (error) {
+    await ejsRuntime.dispose();
+    throw error;
+  }
+  openedDomains.push(domain);
   const variableDomain = await ctx.storageDomain.open(variableDomainSpec);
+  openedDomains.push(variableDomain);
   const frontendDomain = await ctx.storageDomain.open(frontendDomainSpec);
+  openedDomains.push(frontendDomain);
   const personaDomain = await ctx.storageDomain.open(personaDomainSpec);
+  openedDomains.push(personaDomain);
   const presetDomain = await ctx.storageDomain.open(presetDomainSpec);
+  openedDomains.push(presetDomain);
   const cards = domain.table("cards");
   const bindings = domain.table("bindings");
   const traces = domain.table("traces");
@@ -376,8 +403,8 @@ export async function apply(ctx: any): Promise<() => Promise<void>> {
       presets: allPresets(),
       runtimeSupport: {
         promptOrder: "applied",
-        contextBudget: "dsh-estimated-truncation",
-        maxReplyTokens: "provider-request",
+        contextBudget: "dsh-native-compaction-or-imported-override",
+        maxReplyTokens: "adapter-default-or-imported-override",
         temperature: "provider-request",
         stream: "always-on",
         topP: "round-trip-only",
@@ -1462,7 +1489,7 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
         system: compiledTavernSystemPrompt(pending.compiled) || `你正在扮演 ${card.title}。`,
         tools: [],
         temperature: pending.compiled.settings.temperature,
-        maxTokens: pending.compiled.settings.maxReplyTokens,
+        ...(pending.compiled.settings.maxReplyTokens === null ? {} : { maxTokens: pending.compiled.settings.maxReplyTokens }),
       };
     });
     agentCtx.on("agent/turn-stopping", async () => {
@@ -2586,19 +2613,91 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
   }}));
 
   return async () => {
-    for (const dispose of disposers.reverse()) dispose();
+    const failures: unknown[] = [];
+    for (const dispose of disposers.reverse()) {
+      try { dispose(); } catch (error) { failures.push(error); }
+    }
     for (const binding of allBindings()) variableReplyGate.discard(binding.sessionId);
-    for (const handle of Array.from(handles.values()).reverse()) await handle.dispose();
-    await ejsRuntime.dispose();
-    await domain.close();
-    await variableDomain.close();
-    await frontendDomain.close();
-    await personaDomain.close();
+    for (const handle of Array.from(handles.values()).reverse()) {
+      try { await handle.dispose(); } catch (error) { failures.push(error); }
+    }
+    try { await disposeInfrastructure(); } catch (error) { failures.push(error); }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "RolePlay 运行时卸载失败");
   };
   } catch (error) {
-    await ejsRuntime.dispose();
+    try {
+      await disposeInfrastructure();
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "RolePlay 启动失败且回滚不完整");
+    }
     throw error;
   }
+}
+
+export async function apply(ctx: any): Promise<() => Promise<void>> {
+  const hostGlobal = globalThis as unknown as { process: { env: Record<string, string | undefined>; getBuiltinModule(id: string): any } };
+  const fs = hostGlobal.process.getBuiltinModule("node:fs") as any;
+  const path = hostGlobal.process.getBuiltinModule("node:path") as any;
+  const dshHome = hostGlobal.process.env.DSH_HOME;
+  if (typeof dshHome !== "string" || dshHome.length === 0) throw new Error("dsh-roleplay 需要隔离的 DSH_HOME");
+  const stateRoot = path.join(dshHome, "dsh-re3-rp");
+  const statePath = path.join(stateRoot, "plugin-state.json");
+
+  // Register a native settings namespace so the Web settings app can place the
+  // plugin-owned lifecycle control in the existing "插件配置" collection.
+  ctx.settings.register(rolePlaySettingsNamespace, rolePlaySettingsSchema, { base: {} });
+
+  const lifecycle = new RolePlayLifecycle({
+    loadEnabled: () => {
+      if (!fs.existsSync(statePath)) return true;
+      const value = JSON.parse(fs.readFileSync(statePath, "utf8"));
+      return value?.enabled !== false;
+    },
+    saveEnabled: (enabled) => {
+      fs.mkdirSync(stateRoot, { recursive: true });
+      const temporaryPath = `${statePath}.${crypto.randomUUID()}.tmp`;
+      try {
+        fs.writeFileSync(temporaryPath, `${JSON.stringify({ enabled }, null, 2)}\n`, "utf8");
+        fs.renameSync(temporaryPath, statePath);
+      } finally {
+        if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath);
+      }
+    },
+    startRuntime: () => applyRuntime(ctx),
+  });
+
+  await lifecycle.initialize();
+  const disposeControlRoute = ctx.webServer.register({
+    kind: "exact",
+    path: "/dsh-re3-rp/control",
+    handler: async (req: any, res: any) => {
+      if (req.method === "GET") {
+        jsonBody(res, 200, { ok: true, ...lifecycle.snapshot(), preservesData: true });
+        return;
+      }
+      if (req.method !== "POST") {
+        jsonBody(res, 405, { ok: false, error: "仅支持 GET 或 POST" });
+        return;
+      }
+      try {
+        const payload = JSON.parse(new TextDecoder().decode(await readBody(req, 16 * 1024)));
+        if (typeof payload?.enabled !== "boolean") throw new Error("enabled 必须是布尔值");
+        const snapshot = await lifecycle.setEnabled(payload.enabled);
+        jsonBody(res, 200, { ok: true, ...snapshot, preservesData: true });
+      } catch (error) {
+        jsonBody(res, 400, { ok: false, ...lifecycle.snapshot(), error: error instanceof Error ? error.message : String(error) });
+      }
+    },
+  });
+
+  return async () => {
+    const failures: unknown[] = [];
+    try { disposeControlRoute(); } catch (error) { failures.push(error); }
+    try { await lifecycle.dispose(); } catch (error) { failures.push(error); }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "RolePlay 控制壳卸载失败");
+  };
 }
 
 function textBody(res: any, status: number, contentType: string, value: string | Uint8Array, method = "GET"): void {
