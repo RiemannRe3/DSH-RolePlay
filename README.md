@@ -78,6 +78,17 @@ dsh web
 
 [下载最新版](https://github.com/RiemannRe3/DSH-RolePlay/releases/latest) · [npm](https://www.npmjs.com/package/@riemannre3/dsh-roleplay) · [问题反馈](https://github.com/RiemannRe3/DSH-RolePlay/issues)
 
+## 下载演示卡
+
+安装插件后，可以下载这些 Character Card V3 PNG，直接从“酒馆 → 导入”开始：
+
+- [苏念念 PNG](cards/su-niannian/card.png) · [JSON](cards/su-niannian/card.json)
+- [玄净 PNG](cards/xuanjing/card.png) · [JSON](cards/xuanjing/card.json)
+- [顾清 PNG](cards/gu-qing/card.png) · [JSON](cards/gu-qing/card.json)
+- [许弥·课间墙 PNG](cards/xu-mi-kejian-wall/card.png) · [JSON](cards/xu-mi-kejian-wall/card.json)
+
+来源、改作说明和许可证见 [演示卡说明](cards/README.md)。
+
 ## 角色卡
 
 ![角色卡详情页](media/readme/04-card.jpg)
