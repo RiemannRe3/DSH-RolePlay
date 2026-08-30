@@ -3,6 +3,20 @@ import { applyVariableUpdate, type VariableObject, type VariableUpdateResult } f
 
 export type SplitMvuPhase = "plot" | "update";
 
+export function extractSplitMvuUpdateBlocks(body: string): string {
+  return Array.from(body.matchAll(/<UpdateVariable\b[^>]*>[\s\S]*?<\/UpdateVariable>/giu), (match) => match[0]).join("\n");
+}
+
+export function interleaveSplitMvuReplies(
+  formalReplies: readonly { seq: number; text: string }[],
+  splitRepliesByAssistantSeq: Readonly<Record<string, string>> = {},
+): string[] {
+  return formalReplies.flatMap((reply) => {
+    const splitReply = splitRepliesByAssistantSeq[String(reply.seq)]?.trim() ?? "";
+    return splitReply.length === 0 ? [reply.text] : [reply.text, splitReply];
+  });
+}
+
 function entryPhase(entry: Pick<WorldbookEntry, "comment">): SplitMvuPhase | undefined {
   if (/\[mvu_plot\]/iu.test(entry.comment)) return "plot";
   if (/\[mvu_update\]/iu.test(entry.comment)) return "update";

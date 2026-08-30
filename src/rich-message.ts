@@ -5,7 +5,38 @@ export type RichFrameContentMetrics = {
   bodyOffsetHeight: number;
   bodyRectTop: number;
   bodyRectBottom: number;
+  // Viewport-coupled layouts may supply the visible scrollable extent that is
+  // still clipped by the current probe height. Fixed authored stages omit it.
   nestedScrollableOverflowHeight?: number;
+};
+
+export type RichFrameScrollableMetrics = {
+  key: string;
+  visible: boolean;
+  top: number;
+  clientHeight: number;
+  scrollHeight: number;
+  owners?: Array<{
+    key: string;
+    kind: "fixed" | "clip" | "scroll";
+    clientHeight: number;
+  }>;
+};
+
+export type RichFrameLayoutSnapshot = {
+  viewportHeight: number;
+  bodyHeight: number;
+  contentBottom: number;
+  layoutVersion: number;
+  scrollables: RichFrameScrollableMetrics[];
+};
+
+export type RichFrameVisibilityNode = {
+  tagName: string;
+  open?: boolean;
+  parentElement: RichFrameVisibilityNode | null;
+  children?: ArrayLike<RichFrameVisibilityNode>;
+  contains?(candidate: RichFrameVisibilityNode): boolean;
 };
 
 export type SillyTavernCompatibilityContext = {
@@ -87,12 +118,173 @@ export function measureRichFrameContentHeight(metrics: RichFrameContentMetrics):
     finite(metrics.bodyOffsetHeight),
     finite(metrics.bodyRectBottom) - bodyTop,
   );
-  // A viewport-relative card can keep body at exactly the current iframe
-  // height while moving the rest of its UI into overflow:auto descendants.
-  // Add that clipped extent so repeated resize receipts grow the viewport
-  // until the outer DSH conversation owns the vertical scroll surface.
+  // A confirmed viewport-coupled shell can still clip authored content in a
+  // descendant scroller. The caller decides whether that fallback applies.
   const nestedOverflow = Math.max(0, finite(metrics.nestedScrollableOverflowHeight ?? 0));
   return Math.max(72, Math.ceil(bodyBottom + nestedOverflow));
+}
+
+// Scrollable descendants can overlap or nest, so their hidden capacity is a
+// geometric extent, not an additive quantity. Inactive pages are excluded by
+// the visibility bit collected from the live DOM.
+export function measureRichFrameScrollableContentBottom(
+  bodyHeight: number,
+  scrollables: readonly RichFrameScrollableMetrics[],
+): number {
+  const finite = (value: number): number => Number.isFinite(value) ? value : 0;
+  let bottom = Math.max(0, finite(bodyHeight));
+  for (const scrollable of scrollables) {
+    if (!scrollable.visible) continue;
+    const top = Math.max(0, finite(scrollable.top));
+    const scrollHeight = Math.max(0, finite(scrollable.scrollHeight));
+    bottom = Math.max(bottom, top + scrollHeight);
+  }
+  return Math.ceil(bottom);
+}
+
+// A closed details keeps only its first summary in the rendered layout. Some
+// browsers still expose scroll metrics for the details element or descendants
+// populated by a late script, so geometry alone cannot classify that hidden
+// option page. Exclude that capacity until the author opens the details.
+export function isRichFrameNodeHiddenByClosedDetails(
+  node: RichFrameVisibilityNode,
+  boundary: RichFrameVisibilityNode | null = null,
+): boolean {
+  for (let ancestor: RichFrameVisibilityNode | null = node; ancestor !== null && ancestor !== boundary; ancestor = ancestor.parentElement) {
+    if (ancestor.tagName.toUpperCase() !== "DETAILS" || ancestor.open === true) continue;
+    if (ancestor === node) return true;
+    const summary = Array.from(ancestor.children ?? []).find((child) => child.tagName.toUpperCase() === "SUMMARY");
+    if (summary === undefined || summary.contains?.(node) !== true) return true;
+  }
+  return false;
+}
+
+// Probe the same document at two heights. A top-level body/shell that follows
+// a meaningful fraction of the viewport delta is coupled to vh. Fixed pixel
+// stages have a zero delta and keep their own internal scrolling.
+export function isRichFrameViewportCoupled(
+  first: RichFrameLayoutSnapshot,
+  second: RichFrameLayoutSnapshot,
+): boolean {
+  if (first.layoutVersion !== second.layoutVersion) return false;
+  const viewportDelta = second.viewportHeight - first.viewportHeight;
+  if (!Number.isFinite(viewportDelta) || Math.abs(viewportDelta) < 80) return false;
+  const followsViewport = (delta: number): boolean => {
+    if (!Number.isFinite(delta) || delta < 24) return false;
+    const ratio = delta / viewportDelta;
+    return ratio >= 0.35 && ratio <= 1.65;
+  };
+  return followsViewport(second.bodyHeight - first.bodyHeight);
+}
+
+export function findRichFrameViewportScrollKeys(
+  first: RichFrameLayoutSnapshot,
+  second: RichFrameLayoutSnapshot,
+): string[] {
+  if (!isRichFrameViewportCoupled(first, second)) return [];
+  const viewportDelta = second.viewportHeight - first.viewportHeight;
+  const secondByKey = new Map(second.scrollables.map((item) => [item.key, item]));
+  const followsViewport = (delta: number, minimum = 0.2): boolean => {
+    if (!Number.isFinite(delta) || delta <= 0) return false;
+    const ratio = delta / viewportDelta;
+    return ratio >= minimum && ratio <= 1.65;
+  };
+  const released: string[] = [];
+  for (const initial of first.scrollables) {
+    const expanded = secondByKey.get(initial.key);
+    if (expanded === undefined || !initial.visible || !expanded.visible) continue;
+    if (!areRichFrameScrollKeysStable([initial.key], first, second)) continue;
+    const initialGap = Math.max(0, initial.scrollHeight - initial.clientHeight);
+    const expandedGap = Math.max(0, expanded.scrollHeight - expanded.clientHeight);
+    if (followsViewport(initialGap - expandedGap)) released.push(initial.key);
+  }
+  return released;
+}
+
+export function areRichFrameScrollKeysStable(
+  keys: readonly string[],
+  first: RichFrameLayoutSnapshot,
+  second: RichFrameLayoutSnapshot,
+): boolean {
+  if (first.layoutVersion !== second.layoutVersion) return false;
+  const viewportDelta = second.viewportHeight - first.viewportHeight;
+  if (!Number.isFinite(viewportDelta) || viewportDelta < 80) return false;
+  const firstByKey = new Map(first.scrollables.map((item) => [item.key, item]));
+  const secondByKey = new Map(second.scrollables.map((item) => [item.key, item]));
+  return keys.every((key) => {
+    const initial = firstByKey.get(key);
+    const expanded = secondByKey.get(key);
+    if (initial === undefined || expanded === undefined || !initial.visible || !expanded.visible) return false;
+    const initialOwners = initial.owners ?? [];
+    const expandedOwnerList = expanded.owners ?? [];
+    const expandedOwners = new Map(expandedOwnerList.map((owner) => [owner.key, owner]));
+    const ownershipStable = initialOwners.length === expandedOwnerList.length
+      && initialOwners.every((owner) => {
+        const changed = expandedOwners.get(owner.key);
+        if (changed === undefined || changed.kind !== owner.kind || owner.kind === "fixed" || owner.kind === "scroll") return false;
+        const ratio = (changed.clientHeight - owner.clientHeight) / viewportDelta;
+        return Number.isFinite(ratio) && ratio >= 0.2 && ratio <= 1.65;
+      });
+    if (!ownershipStable) return false;
+    const clientRatio = (expanded.clientHeight - initial.clientHeight) / viewportDelta;
+    const followsViewport = Number.isFinite(clientRatio) && clientRatio >= 0.2 && clientRatio <= 1.65;
+    const fullyExpanded = initial.scrollHeight <= initial.clientHeight + 2
+      && expanded.scrollHeight <= expanded.clientHeight + 2;
+    return followsViewport || fullyExpanded;
+  });
+}
+
+// For a viewport-driven scroller, increasing the iframe closes part of its
+// overflow gap. Project that closure rate to the height where the gap reaches
+// zero. Fixed scrollers have a zero rate and therefore remain internal.
+export function resolveRichFrameProbeHeight(
+  first: RichFrameLayoutSnapshot,
+  second: RichFrameLayoutSnapshot,
+): number {
+  if (first.layoutVersion !== second.layoutVersion) {
+    return clampRichFrameHeight(first.bodyHeight);
+  }
+  const viewportDelta = second.viewportHeight - first.viewportHeight;
+  let target = Math.max(0, first.bodyHeight);
+  if (!Number.isFinite(viewportDelta) || viewportDelta < 80) return clampRichFrameHeight(target);
+  const bodyDelta = second.bodyHeight - first.bodyHeight;
+  const bodyRatio = bodyDelta / viewportDelta;
+  const bodyFollowsViewport = bodyDelta >= 24
+    && bodyRatio >= 0.35
+    && bodyRatio <= 1.65;
+  // A responsive descendant inside a fixed stage is still owned by that
+  // stage. Only a top-level body/shell that follows the probe may release its
+  // own viewport-driven scroll regions to the outer Conversation.
+  if (!bodyFollowsViewport) return clampRichFrameHeight(target);
+
+  const releasedKeys = new Set(findRichFrameViewportScrollKeys(first, second));
+  const secondByKey = new Map(second.scrollables.map((item) => [item.key, item]));
+  for (const initial of first.scrollables) {
+    if (!releasedKeys.has(initial.key)) continue;
+    const expanded = secondByKey.get(initial.key);
+    if (expanded === undefined || !initial.visible || !expanded.visible) continue;
+    const initialGap = Math.max(0, initial.scrollHeight - initial.clientHeight);
+    const expandedGap = Math.max(0, expanded.scrollHeight - expanded.clientHeight);
+    const closureRate = (initialGap - expandedGap) / viewportDelta;
+    if (!Number.isFinite(closureRate) || closureRate < 0.2 || closureRate > 1.65) continue;
+    target = Math.max(target, first.viewportHeight + initialGap / closureRate);
+  }
+  return clampRichFrameHeight(target);
+}
+
+export function resolveRichFrameLayoutHeight(
+  snapshot: RichFrameLayoutSnapshot,
+  viewportCoupled: boolean,
+  releasedScrollKeys: readonly string[] = [],
+): number {
+  const released = new Set(releasedScrollKeys);
+  const target = viewportCoupled
+    ? measureRichFrameScrollableContentBottom(
+      snapshot.bodyHeight,
+      snapshot.scrollables.map((item) => ({ ...item, visible: item.visible && released.has(item.key) })),
+    )
+    : snapshot.bodyHeight;
+  return clampRichFrameHeight(target);
 }
 
 // Real cards can legitimately be many screens tall, so the Host owns one
@@ -200,4 +392,22 @@ export function adaptRealCardFrontendHtml(value: string): string {
     // aliases to the compatibility globals installed inside the data document.
     .replaceAll("window.parent.postMessage", "parent.postMessage")
     .replace(/window\.(?:parent|top)(?![\w$])/gu, "window");
+}
+
+const magVarUpdateLoader = "import 'https://testingcf.jsdelivr.net/gh/MagicalAstrogy/MagVarUpdate/artifact/bundle.js'";
+
+// Community cards commonly carry this one-line loader to publish MagVarUpdate
+// into SillyTavern's parent page. DSH already installs a Session-backed Mvu
+// facade before companion scripts run, while the upstream bundle expects an
+// external `z` global and direct parent-window writes that an isolated iframe
+// must not receive. Preserve the authored card source in its revision/detail,
+// but adapt this exact, standalone community loader to the native compatibility
+// seam at execution time. Do not rewrite pinned variants, mixed scripts, or the
+// same URL inside string/template literals: those may rely on upstream side
+// effects beyond DSH's deliberately narrow facade. Other scripts remain
+// untouched and require consent.
+export function adaptTavernHelperScriptSource(value: string): string {
+  return value.trim() === magVarUpdateLoader
+    ? "void window.waitGlobalInitialized('Mvu');"
+    : value;
 }

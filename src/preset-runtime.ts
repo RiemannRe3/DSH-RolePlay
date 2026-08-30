@@ -102,6 +102,44 @@ const DEFAULT_ORDER: ReadonlyArray<TavernPromptOrderItem> = Object.freeze([
   { identifier: "jailbreak", enabled: true },
 ]);
 
+const DSH_FORMAT_PROMPTS: ReadonlyArray<Omit<TavernPromptDefinition, "extra">> = Object.freeze([
+  {
+    identifier: "dshFormatSelfCheck",
+    name: "DSH 格式自检",
+    role: "system",
+    content: [
+      "在提交回复前，静默执行一次格式完整性检查：",
+      "- 识别当前卡片、世界书和对话历史明确要求的全部非正文输出结构；",
+      "- 确认必需结构没有遗漏、顺序与位置正确，并且所有需要闭合的标签均已闭合；",
+      "- 不要输出检查过程，也不要凭空新增未被要求的结构。",
+    ].join("\n"),
+    systemPrompt: false,
+    injectionPosition: "relative",
+    injectionDepth: 4,
+    injectionOrder: 100,
+  },
+  {
+    identifier: "dshResponseContract",
+    name: "DSH 回复契约",
+    role: "user",
+    content: [
+      "回复契约：完成本轮要求的正文后，继续输出当前卡片、世界书或对话历史明确要求的全部非正文结构，例如 XML/HTML、状态栏、行动选项、信息面板、摘要或变量更新。",
+      "只输出实际被要求的结构，不要凭空新增。停止剧情推进、交还玩家控制权或正文到此结束，只约束剧情正文，不表示省略这些必需结构。",
+      "保持规定的顺序与位置；要求位于正文底部的结构必须放在正文之后；所有需要闭合的标签都必须完整闭合。",
+    ].join("\n"),
+    systemPrompt: false,
+    injectionPosition: "relative",
+    injectionDepth: 4,
+    injectionOrder: 100,
+  },
+]);
+
+const CURRENT_DEFAULT_ORDER: ReadonlyArray<TavernPromptOrderItem> = Object.freeze([
+  ...DEFAULT_ORDER,
+  { identifier: "dshFormatSelfCheck", enabled: true },
+  { identifier: "dshResponseContract", enabled: true },
+]);
+
 const TOP_LEVEL_KEYS = new Set([
   "temperature", "frequency_penalty", "presence_penalty", "top_p", "openai_max_context", "openai_max_tokens",
   "max_context_unlocked", "wi_format", "worldInfoFormat", "stream_openai", "prompts", "prompt_order", "promptOrder", "settings", "extra", "name", "id", "source", "revision", "createdAt", "updatedAt",
@@ -228,9 +266,11 @@ export function normalizeTavernPreset(value: unknown, options: { id?: string; na
   };
 }
 
-export function createDefaultTavernPreset(now = "2026-08-26T00:00:00.000Z"): TavernPromptPreset {
-  return normalizeTavernPreset({
-    name: "DSH RolePlay Default",
+function defaultPresetInput(options: { includeFormatContract: boolean; name: string }): Record<string, unknown> {
+  const prompts = options.includeFormatContract ? [...PINNED_PROMPTS, ...DSH_FORMAT_PROMPTS] : PINNED_PROMPTS;
+  const order = options.includeFormatContract ? CURRENT_DEFAULT_ORDER : DEFAULT_ORDER;
+  return {
+    name: options.name,
     temperature: 1,
     frequency_penalty: 0,
     presence_penalty: 0,
@@ -238,7 +278,7 @@ export function createDefaultTavernPreset(now = "2026-08-26T00:00:00.000Z"): Tav
     max_context_unlocked: false,
     wi_format: "{0}",
     stream_openai: true,
-    prompts: PINNED_PROMPTS.map((prompt) => ({
+    prompts: prompts.map((prompt) => ({
       identifier: prompt.identifier,
       name: prompt.name,
       role: prompt.role,
@@ -246,12 +286,32 @@ export function createDefaultTavernPreset(now = "2026-08-26T00:00:00.000Z"): Tav
       system_prompt: prompt.systemPrompt,
       ...(prompt.marker === undefined ? {} : { marker: true }),
     })),
-    prompt_order: [{ character_id: 100001, order: DEFAULT_ORDER }],
+    prompt_order: [{ character_id: 100001, order }],
     chat_completion_source: "openai",
-  }, { id: "dsh-roleplay-default-1", source: "builtin", now });
+  };
 }
 
+export function createLegacyDefaultTavernPreset(now = "2026-08-26T00:00:00.000Z"): TavernPromptPreset {
+  return normalizeTavernPreset(defaultPresetInput({ includeFormatContract: false, name: "DSH RolePlay Default v1" }), {
+    id: "dsh-roleplay-default-1",
+    source: "builtin",
+    now,
+  });
+}
+
+export function createDefaultTavernPreset(now = "2026-08-30T00:00:00.000Z"): TavernPromptPreset {
+  return normalizeTavernPreset({
+    ...defaultPresetInput({ includeFormatContract: true, name: "DSH RolePlay Default" }),
+    revision: 2,
+  }, { id: "dsh-roleplay-default-2", source: "builtin", now });
+}
+
+export const LEGACY_DEFAULT_TAVERN_PRESET = createLegacyDefaultTavernPreset();
 export const DEFAULT_TAVERN_PRESET = createDefaultTavernPreset();
+export const BUILTIN_TAVERN_PRESETS: ReadonlyArray<TavernPromptPreset> = Object.freeze([
+  DEFAULT_TAVERN_PRESET,
+  LEGACY_DEFAULT_TAVERN_PRESET,
+]);
 
 export function exportSillyTavernPreset(preset: TavernPromptPreset): Record<string, unknown> {
   return {

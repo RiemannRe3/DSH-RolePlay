@@ -33,6 +33,9 @@ export type MessageRegexScript = {
 };
 
 export type FrontendProjectionMessage = { seq: number; role: "user" | "assistant"; text: string; rawText?: string };
+export type FrontendProjectionOptions = {
+  assistantDisplayUpdates?: Readonly<Record<string, string>>;
+};
 export type FrontendProjection = {
   sessionId: string;
   messages: FrontendProjectionMessage[];
@@ -152,10 +155,27 @@ export function messageRegexScriptsFromExtensions(value: unknown): MessageRegexS
   });
 }
 
-export function projectMessageRegex(text: string, scripts: readonly MessageRegexScript[], macroValues?: CardMacroValues, depth?: number): string {
+export function projectMessageRegex(
+  text: string,
+  scripts: readonly MessageRegexScript[],
+  macroValues?: CardMacroValues,
+  depth?: number,
+  depthMode: "current" | "stable-assistant-display" = "current",
+): string {
   const projected = scripts.reduce((value, script) => {
-    if (typeof depth === "number" && script.minDepth !== null && depth < script.minDepth) return value;
-    if (typeof depth === "number" && script.maxDepth !== null && depth > script.maxDepth) return value;
+    // SillyTavern evaluates a message at its current depth, but a display Regex
+    // that already produced mounted DOM is not undone merely because later
+    // turns move that message beyond maxDepth. DSH reconstructs projections
+    // from Session state, so clamp only that upper-bound transition while
+    // retaining the real depth for minDepth eligibility.
+    const effectiveDepth = typeof depth === "number"
+      && depthMode === "stable-assistant-display"
+      && script.maxDepth !== null
+      && depth > script.maxDepth
+      ? script.maxDepth
+      : depth;
+    if (typeof effectiveDepth === "number" && script.minDepth !== null && effectiveDepth < script.minDepth) return value;
+    if (typeof effectiveDepth === "number" && script.maxDepth !== null && effectiveDepth > script.maxDepth) return value;
     return value.replace(new RegExp(script.pattern, script.flags), (match, ...args: unknown[]) => {
     const groups = typeof args.at(-1) === "object" ? args.at(-1) as Record<string, string> : undefined;
     const captures = args.slice(0, groups === undefined ? -2 : -3);
@@ -194,8 +214,9 @@ export function stripAssistantControlForDisplay(text: string): string {
   const withoutReasoning = text.replace(/<(?:think|reasoning)\b[^>]*>[\s\S]*?<\/(?:think|reasoning)>/giu, "");
   const withoutStandaloneAnalysis = withoutReasoning.replace(/<Analysis\b[^>]*>[\s\S]*?<\/Analysis>/giu, "");
   const withoutUpdates = withoutStandaloneAnalysis.replace(/<UpdateVariable\b[^>]*>[\s\S]*?<\/UpdateVariable>/giu, "");
-  const opening = /^\s*\[开局\]([\s\S]*?)\[\/开局\]\s*$/u.exec(withoutUpdates);
-  const visible = opening === null ? withoutUpdates : opening[1] ?? "";
+  const withoutHostStatusSlot = withoutUpdates.replace(/<StatusPlaceHolderImpl\s*\/>|<StatusPlaceholderImpl\s*\/>/giu, "");
+  const opening = /^\s*\[开局\]([\s\S]*?)\[\/开局\]\s*$/u.exec(withoutHostStatusSlot);
+  const visible = opening === null ? withoutHostStatusSlot : opening[1] ?? "";
   return visible.replace(/^(?:[ \t]*\r?\n)+/u, "").trimEnd();
 }
 
@@ -260,18 +281,22 @@ function messageText(message: any): string {
 }
 
 const CONVENTIONAL_STATUS_SLOT = "<StatusPlaceHolderImpl/>";
+const conventionalStatusSlotPattern = /<StatusPlaceHolderImpl\s*\/>|<StatusPlaceholderImpl\s*\/>/iu;
 
 function isConventionalStatusFrontendScript(script: MessageRegexScript): boolean {
-  if (!script.pattern.includes("StatusPlaceHolderImpl")) return false;
+  if (!/StatusPlaceHolderImpl|StatusPlaceholderImpl/u.test(script.pattern)) return false;
   if (!/<(?:!doctype|html|head|body|style|script|div|section|details|button|[a-z][\w:-]*\b)/iu.test(script.replacement)) return false;
-  try { return new RegExp(script.pattern, script.flags).test(CONVENTIONAL_STATUS_SLOT); } catch { return false; }
+  try {
+    const expression = new RegExp(script.pattern, script.flags);
+    return expression.test(CONVENTIONAL_STATUS_SLOT) || expression.test("<StatusPlaceholderImpl/>");
+  } catch { return false; }
 }
 
 function hasConventionalStatusFrontend(scripts: readonly MessageRegexScript[]): boolean {
   return scripts.some(isConventionalStatusFrontendScript);
 }
 
-function assistantDisplayProjection(text: string, scripts: readonly MessageRegexScript[], afterPlayerTurn: boolean): {
+function assistantDisplayProjection(text: string, scripts: readonly MessageRegexScript[], afterPlayerTurn: boolean, supplementalUpdate?: string): {
   source: string;
   scripts: readonly MessageRegexScript[];
 } {
@@ -280,19 +305,26 @@ function assistantDisplayProjection(text: string, scripts: readonly MessageRegex
   // response. For a DSH-synthesized slot, keep the rich status renderer while
   // excluding validation/cleanup Regex that treat a missing inline block as an
   // error. The formal Session reply remains byte-for-byte unchanged.
-  const hasVariableUpdate = /<UpdateVariable\b[^>]*>[\s\S]*?<\/UpdateVariable>/iu.test(text);
-  if (!afterPlayerTurn || text.includes(CONVENTIONAL_STATUS_SLOT) || !hasConventionalStatusFrontend(scripts)) {
-    return { source: text, scripts };
+  const update = supplementalUpdate?.trim() ?? "";
+  const source = update.length === 0 ? text : `${text}\n\n${update}`;
+  const hasVariableUpdate = /<UpdateVariable\b[^>]*>[\s\S]*?<\/UpdateVariable>/iu.test(source);
+  if (!afterPlayerTurn || conventionalStatusSlotPattern.test(source) || !hasConventionalStatusFrontend(scripts)) {
+    return { source, scripts };
   }
   return {
-    source: `${text}\n\n${CONVENTIONAL_STATUS_SLOT}`,
+    source: `${source}\n\n${CONVENTIONAL_STATUS_SLOT}`,
     scripts: hasVariableUpdate
       ? scripts
-      : scripts.filter((script) => !script.pattern.includes("StatusPlaceHolderImpl") || isConventionalStatusFrontendScript(script)),
+      : scripts.filter((script) => !/StatusPlaceHolderImpl|StatusPlaceholderImpl/u.test(script.pattern) || isConventionalStatusFrontendScript(script)),
   };
 }
 
-export function projectFrontendMessages(session: any, regexScripts: readonly MessageRegexScript[] = [], macroValues?: CardMacroValues): FrontendProjectionMessage[] {
+export function projectFrontendMessages(
+  session: any,
+  regexScripts: readonly MessageRegexScript[] = [],
+  macroValues?: CardMacroValues,
+  options: FrontendProjectionOptions = {},
+): FrontendProjectionMessage[] {
   const nodes = Array.isArray(session?.surface?.nodes) ? session.surface.nodes : [];
   const formalNodes = nodes.filter((seq: number) => {
     const event = session?.events?.[seq];
@@ -308,11 +340,11 @@ export function projectFrontendMessages(session: any, regexScripts: readonly Mes
     const isCardOpening = (message?.source?.provider === "dsh-roleplay" || message?.source?.provider === "dsh-re3-rp") && message?.source?.model === "character-card-opening";
     const afterPlayerTurn = role === "assistant" && !isCardOpening && formalNodes.slice(0, nodeIndex).some((candidateSeq: number) => session?.events?.[candidateSeq]?.type === "user/message");
     const display = role === "assistant"
-      ? assistantDisplayProjection(text, regexScripts, afterPlayerTurn)
+      ? assistantDisplayProjection(text, regexScripts, afterPlayerTurn, options.assistantDisplayUpdates?.[seq])
       : { source: text, scripts: regexScripts };
     const depth = formalNodes.length - nodeIndex - 1;
     const projected = role === "assistant"
-      ? stripAssistantControlForDisplay(projectMessageRegex(stripInitvarForDisplay(display.source), display.scripts, macroValues, depth))
+      ? stripAssistantControlForDisplay(projectMessageRegex(stripInitvarForDisplay(display.source), display.scripts, macroValues, depth, "stable-assistant-display"))
       : text;
     return [{ seq, role, text: projected, ...(projected === text ? {} : { rawText: text }) }];
   });

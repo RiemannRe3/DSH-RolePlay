@@ -306,7 +306,7 @@ export async function parseCard(bytes: Uint8Array, sourceName: string, inflate: 
   const invalidRegexEntries = worldbook.filter((entry) => entry.useRegex && entry.keys.some((key) => { try { new RegExp(key, entry.caseSensitive ? "u" : "iu"); return false; } catch { return true; } }));
   if (invalidRegexEntries.length > 0) compatibilityRows.push({ capability: "世界书无效正则键", disposition: "已禁用", evidence: `${invalidRegexEntries.length} 个条目的正则键无法编译，条目原文仍保留；entry id：${invalidRegexEntries.slice(0, 12).map((entry) => entry.id).join("、")}` });
   if (unsupportedWorldbookFields.size > 0) compatibilityRows.push({ capability: "世界书未执行字段", disposition: "仅保留", evidence: `原件完整保存；纯文字运行时不解释：${Array.from(unsupportedWorldbookFields).slice(0, 12).join("、")}${unsupportedWorldbookFields.size > 12 ? "…" : ""}` });
-  if (Array.isArray(data.group_only_greetings) && data.group_only_greetings.length > 0) compatibilityRows.push({ capability: "群组专用开场", disposition: "仅保留", evidence: `${data.group_only_greetings.length} 个 group_only_greetings 保留在原件；#107 只建立单角色会话` });
+  if (Array.isArray(data.group_only_greetings) && data.group_only_greetings.length > 0) compatibilityRows.push({ capability: "群组专用开场", disposition: "仅保留", evidence: `${data.group_only_greetings.length} 个 group_only_greetings 保留在原件；当前版本只建立单角色会话` });
   const unsupportedMacros = new Set<string>();
   for (const match of JSON.stringify(data).matchAll(/\{\{\s*([a-z_][a-z0-9_-]*)(?::[^{}]*)?\s*\}\}/giu)) {
     const name = match[1].toLocaleLowerCase();

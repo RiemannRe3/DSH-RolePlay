@@ -1,6 +1,6 @@
 {
   "name": "@riemannre3/dsh-roleplay",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "license": "MIT",
   "author": "RiemannRe3",
   "repository": {
@@ -47,8 +47,7 @@
   },
   "files": [
     "cordis.patch.yml",
-    "demo.png",
-    "plugin-settings.png",
+    "THIRD_PARTY_NOTICES.md",
     "lib/index.js",
     "lib/client.js",
     "lib/card-library.js",
@@ -67,6 +66,7 @@
     "lib/compatibility-call-runtime.js",
     "lib/mvu-session-control.js",
     "lib/auxiliary-generation.js",
+    "lib/assistant-stream.js",
     "lib/lifecycle.js",
     "runtime-assets/standalone/core.js",
     "runtime-assets/standalone/index.html",

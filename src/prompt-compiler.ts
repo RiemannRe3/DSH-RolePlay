@@ -65,6 +65,15 @@ function formatWorldInfo(template: string, content: string): string { return con
 function resolveOutlets(text: string, outlets: Readonly<Record<string, string>>): string { return text.replace(/\{\{outlet::([^{}]+)\}\}/gu, (_match, name: string) => outlets[name.trim()] ?? ""); }
 function estimateMessageTokens(message: CompiledTavernMessage): number { return Math.ceil(message.content.length / 4) + 4; }
 
+function overridablePromptContent(definition: TavernPromptDefinition, cardOverride: string, values: MacroValues): string {
+  const presetContent = definition.content;
+  const overrideAllowed = definition.extra.forbid_overrides !== true;
+  const selected = overrideAllowed && cardOverride.trim().length > 0
+    ? cardOverride.replace(/\{\{original\}\}/giu, presetContent)
+    : presetContent;
+  return clean(substituteCardMacros(selected, values));
+}
+
 function sourceFor(definition: TavernPromptDefinition, kind: CompiledTavernMessage["source"]["kind"], extra: Partial<CompiledTavernMessage["source"]> = {}): CompiledTavernMessage["source"] {
   return {
     kind,
@@ -167,7 +176,7 @@ function markerMessages(input: {
   const { definition, card, placement, values } = input;
   switch (definition.marker) {
     case "main-prompt": {
-      const text = clean(substituteCardMacros(card.systemPrompt, values)) || clean(substituteCardMacros(definition.content, values)) || `你正在扮演 ${card.title}。请始终以角色身份自然地延续当前对话。`;
+      const text = overridablePromptContent(definition, card.systemPrompt, values) || `你正在扮演 ${card.title}。请始终以角色身份自然地延续当前对话。`;
       return [{ role: definition.role, content: text, source: sourceFor(definition, "preset") }];
     }
     case "world-info-before": {
@@ -207,7 +216,7 @@ function markerMessages(input: {
     }
     case "chat-history": return compileChatHistory(input.chat, placement, definition, input.inChatPrompts, values);
     case "post-history-instructions": {
-      const text = clean(substituteCardMacros(card.postHistoryInstructions, values)) || clean(substituteCardMacros(definition.content, values));
+      const text = overridablePromptContent(definition, card.postHistoryInstructions, values);
       return text.length === 0 ? [] : [{ role: definition.role, content: text, source: sourceFor(definition, "preset") }];
     }
     default: return [];
@@ -335,7 +344,27 @@ export function applyCompiledPromptToRequest(options: any, compiled: CompiledTav
   const leadingSystem: string[] = [];
   while (messages[0]?.role === "system") leadingSystem.push(messages.shift()!.content[0]!.text);
   options.system = leadingSystem.join("\n\n");
-  options.messages = messages;
+  // SillyTavern's DeepSeek request path normalizes consecutive equal-role
+  // messages before the provider call. Keep the compiled evidence granular,
+  // but reproduce the text-safe part of that wire behavior so a card's format
+  // protocol, latest player instruction, and final format contract remain one
+  // contiguous instruction block.
+  if (/^deepseek(?:-|$)/iu.test(String(options.provider ?? ""))) {
+    const merged: typeof messages = [];
+    for (const message of messages) {
+      const previous = merged.at(-1);
+      const previousText = previous?.content.length === 1 && previous.content[0]?.type === "text" ? previous.content[0] : undefined;
+      const currentText = message.content.length === 1 && message.content[0]?.type === "text" ? message.content[0] : undefined;
+      if (previous !== undefined && previous.role === message.role && previousText !== undefined && currentText !== undefined && currentText.text.length > 0) {
+        previousText.text += `\n\n${currentText.text}`;
+        continue;
+      }
+      merged.push(message);
+    }
+    options.messages = merged;
+  } else {
+    options.messages = messages;
+  }
   options.tools = [];
   options.temperature = compiled.settings.temperature;
   if (compiled.settings.maxReplyTokens !== null) options.maxTokens = compiled.settings.maxReplyTokens;

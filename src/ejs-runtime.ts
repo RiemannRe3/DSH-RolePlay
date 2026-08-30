@@ -113,6 +113,10 @@ export async function createEjsRuntime(options: EjsRuntimeOptions = {}): Promise
   const maxStackSizeBytes = Math.max(128 * 1024, Math.min(4 * 1024 * 1024, options.maxStackSizeBytes ?? 512 * 1024));
   const maximumInputBytes = Math.max(64 * 1024, Math.min(64 * 1024 * 1024, options.maximumInputBytes ?? 256 * 1024));
   const maximumOutputBytes = Math.max(64 * 1024, Math.min(64 * 1024 * 1024, options.maximumOutputBytes ?? 1024 * 1024));
+  // The first request also pays for Worker startup and QuickJS WASM loading.
+  // Keep the in-VM execution deadline strict, but do not mistake a cold Windows
+  // process start for hostile card code.
+  const hostDeadlineMs = Math.min(10_000, Math.max(2_500, deadlineMs + 1_000));
   const bytes = (value: string): number => new TextEncoder().encode(value).byteLength;
   let worker: NodeWorker | undefined;
   let nextRequestId = 0;
@@ -176,7 +180,7 @@ export async function createEjsRuntime(options: EjsRuntimeOptions = {}): Promise
       const timer = setTimeout(() => settle(() => {
         void terminateWorker(target);
         reject(runtimeError("ejs_timeout", "EJS 执行超过墙钟时间边界"));
-      }), Math.max(100, deadlineMs + 100));
+      }), hostDeadlineMs);
       target.on("message", onMessage);
       target.once("error", onError);
       target.once("exit", onExit);

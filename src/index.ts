@@ -5,16 +5,17 @@ import { defineDomain, domainTable } from "@deepseek-ai/dsh-storage-domain";
 import { NORMALIZED_CARD_INDEX_VERSION, parseCard, sha256, type NormalizedCard } from "./card-runtime.js";
 import { activateWorldbookWithRenderer, normalizeWorldbookEntry, placeWorldbook, substituteCardMacros, type WorldbookActivation } from "./worldbook.js";
 import { applyCompiledPromptToRequest, compileTavernPrompt, compiledTavernSystemPrompt, normalizeTavernChatMessages, renderTavernContextEnvelope, type CompiledTavernPrompt } from "./prompt-compiler.js";
-import { DEFAULT_TAVERN_PRESET, exportSillyTavernPreset, normalizeTavernPreset, type TavernPromptPreset } from "./preset-runtime.js";
+import { BUILTIN_TAVERN_PRESETS, DEFAULT_TAVERN_PRESET, exportSillyTavernPreset, normalizeTavernPreset, type TavernPromptPreset } from "./preset-runtime.js";
 import { createTavernSessionSeed, currentOpeningSurfaceSeq, currentOpeningText, currentWorldbookSurfaceSeq, hasPlayerMessage, isTavernPluginId, isolateTavernAssembly, openingIdFromSetChatMessages, tavernSurfaceAudit, tavernSurfaceEventDetail, TAVERN_PLUGIN_ID, TAVERN_WORLD_CONTEXT_MARKER, upsertTavernAssemblyContext, worldbookContextRevision, type TavernAssemblySummary } from "./session-runtime.js";
 import { applyVariableUpdate, CommittedReplyVariableGate, initializeVariableRuntime, mergeVariableScopes, variableStateDigest, type VariableObject, type VariableRuntimeEvent, type VariableSource, type VariableUpdateResult } from "./variable-runtime.js";
 import { adaptOpeningFrontendHtml, applyFrontendStateAction, bridgeCapabilities, frontendStateDigest, groupFrontendMessagesForNativeFlow, initialFrontendState, projectFrontendMessages, waitForCommittedFrontendTurn, type FrontendDefinition, type FrontendProjection } from "./frontend-runtime.js";
 import { createEjsRuntime } from "./ejs-runtime.js";
-import { applySplitMvuPatchCompatibility, hasSplitMvuContract, splitMvuActivationForPhase } from "./split-mvu.js";
+import { applySplitMvuPatchCompatibility, extractSplitMvuUpdateBlocks, hasSplitMvuContract, interleaveSplitMvuReplies, splitMvuActivationForPhase } from "./split-mvu.js";
 import { compatibilityCallCatalog, describeCompatibilityCall } from "./compatibility-call-runtime.js";
 import { defaultMvuSessionSettings, normalizeMvuSessionSettings, replayMvuReplies, resolveMvuExtraModel, supportsExtraModelParsing, type MvuSessionSettings } from "./mvu-session-control.js";
 import { personaBindingKey, personaBindingKeysToClearForSelection, renderPersonaPrompt, resolvePersona, validatePersonaDraft, type PersonaBindingRecord, type PersonaBindingScope, type PersonaRecord } from "./persona-runtime.js";
 import { applyTavernHelperGenerateInjections, generateScanText, normalizeTavernHelperGenerateConfig } from "./auxiliary-generation.js";
+import { captureAssistantTextStream } from "./assistant-stream.js";
 import { hideCardFromLibrary, orderVisibleCards, preserveCardLibraryMetadata, reorderVisibleCards, restoreCardToLibrary, type CardLibraryRecord } from "./card-library.js";
 import { RolePlayLifecycle } from "./lifecycle.js";
 
@@ -113,6 +114,7 @@ type VariableStateRecord = {
   updatedAt: string;
   lastCommittedStateBefore?: VariableObject;
   lastCommittedReplyDigest?: string;
+  splitMvuRepliesByAssistantSeq?: Record<string, string>;
 };
 
 type FrontendStateRecord = {
@@ -361,9 +363,12 @@ async function applyRuntime(ctx: any): Promise<() => Promise<void>> {
   const personaBindings = personaDomain.table("bindings");
   const storedPresets = presetDomain.table("presets");
   const presetSettings = presetDomain.table("settings");
+  const builtinPresets = new Map(BUILTIN_TAVERN_PRESETS.map((preset) => [preset.id, preset]));
 
   const presetFor = (presetId: string | undefined): TavernPromptPreset => {
-    if (presetId === undefined || presetId.length === 0 || presetId === DEFAULT_TAVERN_PRESET.id) return DEFAULT_TAVERN_PRESET;
+    if (presetId === undefined || presetId.length === 0) return DEFAULT_TAVERN_PRESET;
+    const builtin = builtinPresets.get(presetId);
+    if (builtin !== undefined) return builtin;
     const value = storedPresets.get(presetId) as RecordValue | undefined;
     if (value === undefined) return DEFAULT_TAVERN_PRESET;
     return normalizeTavernPreset(value, {
@@ -373,8 +378,8 @@ async function applyRuntime(ctx: any): Promise<() => Promise<void>> {
     });
   };
   const allPresets = (): TavernPromptPreset[] => [
-    DEFAULT_TAVERN_PRESET,
-    ...Array.from(storedPresets.entries() as IterableIterator<[string, RecordValue]>).map(([id, value]) => presetFor(id)).filter((preset) => preset.id !== DEFAULT_TAVERN_PRESET.id),
+    ...BUILTIN_TAVERN_PRESETS,
+    ...Array.from(storedPresets.entries() as IterableIterator<[string, RecordValue]>).map(([id]) => presetFor(id)).filter((preset) => !builtinPresets.has(preset.id)),
   ];
   const activePresetId = (): string => {
     const value = presetSettings.get("active") as RecordValue | undefined;
@@ -445,6 +450,7 @@ async function applyRuntime(ctx: any): Promise<() => Promise<void>> {
   const variableReplyGate = new CommittedReplyVariableGate();
   const pendingBridgeOperations = new Map<string, Promise<RecordValue>>();
   const pendingOpeningSelections = new Map<string, Promise<unknown>>();
+  const pendingCardStorageWrites = new Map<string, Promise<void>>();
   const activeAuxiliaryGenerations = new Map<string, AbortController>();
   const compiledRequestReentryGuards = new WeakSet<object>();
   const splitMvuRequestGuards = new WeakSet<object>();
@@ -659,7 +665,12 @@ async function applyRuntime(ctx: any): Promise<() => Promise<void>> {
     const variableState = variableStates.get(sessionId) as unknown as VariableStateRecord | undefined;
     return {
       sessionId,
-      messages: projectFrontendMessages(session, card.messageRegexScripts, { userName: effectiveUserName(binding), characterName: card.title, messageVariables: variableState?.state, macroSeed: sessionId }),
+      messages: projectFrontendMessages(
+        session,
+        card.messageRegexScripts,
+        { userName: effectiveUserName(binding), characterName: card.title, messageVariables: variableState?.state, macroSeed: sessionId },
+        { assistantDisplayUpdates: variableState?.splitMvuRepliesByAssistantSeq ?? {} },
+      ),
       state: record.state,
       stateDigest: record.stateDigest,
       eventSequence: record.eventSequence,
@@ -992,17 +1003,54 @@ async function applyRuntime(ctx: any): Promise<() => Promise<void>> {
   };
 
   const replaceCardStorage = async (sessionId: string, payload: RecordValue): Promise<RecordValue> => {
-    const { binding } = cardBridgeContext(sessionId);
-    if (typeof payload.entries !== "object" || payload.entries === null || Array.isArray(payload.entries)) throw bridgeFailure("invalid_action", "卡片存储必须是字符串键值对象");
-    const entries: Record<string, string> = {};
-    for (const [key, value] of Object.entries(payload.entries as RecordValue)) {
-      if (Object.keys(entries).length >= 512 || key.length > 256 || typeof value !== "string") throw bridgeFailure("invalid_action", "卡片存储键值无效或数量过多");
-      entries[key] = value;
+    cardBridgeContext(sessionId);
+    type StorageMutation = { kind: "set"; key: string; value: string } | { kind: "remove"; key: string } | { kind: "clear" };
+    const mutations: StorageMutation[] | undefined = Array.isArray(payload.mutations)
+      ? payload.mutations.map((value): StorageMutation => {
+        if (typeof value !== "object" || value === null || Array.isArray(value)) throw bridgeFailure("invalid_action", "卡片存储操作无效");
+        const mutation = value as RecordValue;
+        if (mutation.kind === "clear") return { kind: "clear" };
+        if ((mutation.kind !== "set" && mutation.kind !== "remove") || typeof mutation.key !== "string" || mutation.key.length > 256) throw bridgeFailure("invalid_action", "卡片存储操作无效");
+        if (mutation.kind === "remove") return { kind: "remove", key: mutation.key };
+        if (typeof mutation.value !== "string") throw bridgeFailure("invalid_action", "卡片存储操作无效");
+        return { kind: "set", key: mutation.key, value: mutation.value };
+      })
+      : undefined;
+    if (mutations !== undefined && mutations.length > 512) throw bridgeFailure("invalid_action", "卡片存储操作过多");
+    let replacement: Record<string, string> | undefined;
+    if (mutations === undefined) {
+      if (typeof payload.entries !== "object" || payload.entries === null || Array.isArray(payload.entries)) throw bridgeFailure("invalid_action", "卡片存储必须是字符串键值对象");
+      replacement = {};
+      for (const [key, value] of Object.entries(payload.entries as RecordValue)) {
+        if (Object.keys(replacement).length >= 512 || key.length > 256 || typeof value !== "string") throw bridgeFailure("invalid_action", "卡片存储键值无效或数量过多");
+        replacement[key] = value;
+      }
     }
-    if (new TextEncoder().encode(JSON.stringify(entries)).byteLength > 1_048_576) throw bridgeFailure("invalid_action", "卡片存储超过 1 MiB");
-    binding.frontendStorage = entries;
-    await bindings.put(sessionId, binding as unknown as RecordValue);
-    return { ok: true, committed: true, entries: binding.frontendStorage };
+    const previous = pendingCardStorageWrites.get(sessionId) ?? Promise.resolve();
+    const operation = previous.then(async (): Promise<RecordValue> => {
+      const { binding } = cardBridgeContext(sessionId);
+      const entries = replacement === undefined ? { ...(binding.frontendStorage ?? {}) } : { ...replacement };
+      for (const mutation of mutations ?? []) {
+        if (mutation.kind === "clear") {
+          for (const key of Object.keys(entries)) delete entries[key];
+        } else if (mutation.kind === "remove") {
+          delete entries[mutation.key];
+        } else {
+          entries[mutation.key] = mutation.value;
+        }
+      }
+      if (Object.keys(entries).length > 512) throw bridgeFailure("invalid_action", "卡片存储键值数量过多");
+      if (new TextEncoder().encode(JSON.stringify(entries)).byteLength > 1_048_576) throw bridgeFailure("invalid_action", "卡片存储超过 1 MiB");
+      binding.frontendStorage = entries;
+      await bindings.put(sessionId, binding as unknown as RecordValue);
+      return { ok: true, committed: true, entries: binding.frontendStorage };
+    });
+    const queued = operation.then(() => undefined, () => undefined);
+    pendingCardStorageWrites.set(sessionId, queued);
+    void queued.finally(() => {
+      if (pendingCardStorageWrites.get(sessionId) === queued) pendingCardStorageWrites.delete(sessionId);
+    });
+    return operation;
   };
 
   const submitFrontendStateAction = async (sessionId: string, operationIdValue: unknown, payload: RecordValue): Promise<RecordValue> => {
@@ -1098,17 +1146,31 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
     { provider: binding.provider, model: binding.model, supportsExtraModel: supportsExtraModel(card) },
   );
 
-  const assistantVariableReplies = (session: any): string[] => {
-    const events = session?.surface?.nodes?.map((seq: number) => session.events?.[seq]) ?? [];
-    return events.flatMap((event: any) => {
+  const assistantVariableReplyEntries = (session: any): Array<{ seq: number; text: string; turn?: number }> => {
+    const nodes = Array.isArray(session?.surface?.nodes) ? session.surface.nodes : [];
+    return nodes.flatMap((seq: number): Array<{ seq: number; text: string; turn?: number }> => {
+      const event = session.events?.[seq];
       if (event?.type !== "assistant/message") return [];
       const message = event.data?.message ?? event.data;
       if (message?.source?.kind === "plugin") return [];
       if (isTavernPluginId(message?.source?.provider) && message?.source?.model === "character-card-opening") return [];
       const value = messageText(message);
-      return value.length === 0 ? [] : [value];
+      return value.length === 0 ? [] : [{ seq, text: value, ...(Number.isSafeInteger(event.data?.turn) ? { turn: Number(event.data.turn) } : {}) }];
     });
   };
+
+  const assistantVariableReplies = (session: any): string[] => assistantVariableReplyEntries(session).map((entry) => entry.text);
+
+  const assistantVariableReplayReplies = (session: any, record: VariableStateRecord): string[] => interleaveSplitMvuReplies(
+    assistantVariableReplyEntries(session),
+    record.splitMvuRepliesByAssistantSeq,
+  );
+
+  const assistantSeqForNarrative = (session: any, narrative: string, turn?: number): number | undefined => assistantVariableReplyEntries(session)
+    .slice()
+    .reverse()
+    .find((candidate) => candidate.text === narrative && (turn === undefined || candidate.turn === turn))
+    ?.seq;
 
   const initializationSources = (card: NormalizedCard, openingId: string): VariableSource[] => {
     const worldbook = card.worldbook
@@ -1177,7 +1239,11 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
     await variableStates.put(record.sessionId, record as unknown as RecordValue);
   };
 
-  const updateVariablesFromReply = async (sessionId: string, body: string): Promise<VariableUpdateResult | undefined> => {
+  const updateVariablesFromReply = async (
+    sessionId: string,
+    body: string,
+    options: { splitMvuAssistantSeq?: number } = {},
+  ): Promise<VariableUpdateResult | undefined> => {
     const record = variableStates.get(sessionId) as unknown as VariableStateRecord | undefined;
     if (record === undefined) return;
     const result = applyVariableUpdate(record.state, body);
@@ -1189,6 +1255,12 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
       record.lastCommittedReplyDigest = await sha256(new TextEncoder().encode(body));
       record.state = result.state;
       record.digest = nextDigest;
+      if (options.splitMvuAssistantSeq !== undefined) {
+        record.splitMvuRepliesByAssistantSeq = {
+          ...(record.splitMvuRepliesByAssistantSeq ?? {}),
+          [String(options.splitMvuAssistantSeq)]: body,
+        };
+      }
     }
     record.updatedAt = new Date().toISOString();
     await variableStates.put(sessionId, record as unknown as RecordValue);
@@ -1212,7 +1284,7 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
     const record = variableStates.get(sessionId) as unknown as VariableStateRecord | undefined;
     const session = ctx.sessions.get(sessionId);
     if (record === undefined || session === undefined) throw new Error("找不到酒馆 Session 的变量状态");
-    const replies = assistantVariableReplies(session);
+    const replies = assistantVariableReplayReplies(session, record);
     if (record.lastCommittedStateBefore !== undefined && record.lastCommittedReplyDigest !== undefined) {
       let target = "";
       for (const reply of replies.slice().reverse()) {
@@ -1245,7 +1317,8 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
       const replacement = await initializeVariables(temporaryId, card, current.selectedOpeningId);
       replacement.sessionId = sessionId;
       replacement.eventSequence = current.eventSequence;
-      const replies = assistantVariableReplies(session);
+      replacement.splitMvuRepliesByAssistantSeq = current.splitMvuRepliesByAssistantSeq;
+      const replies = assistantVariableReplayReplies(session, replacement);
       const initial = replacement.initialSnapshots[replacement.selectedOpeningId];
       if (initial === undefined || initial.status !== "initialized") throw new Error("重新读取的初始变量未通过校验，原状态未改动");
       const replay = replayMvuReplies(initial.state, replies);
@@ -1264,7 +1337,8 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
     }
   };
 
-  const runSplitMvuUpdate = async (sessionId: string, binding: Binding, card: NormalizedCard, compiled: CompiledTavernPrompt | string, narrative: string): Promise<VariableUpdateResult | undefined> => {
+  const runSplitMvuUpdate = async (sessionId: string, binding: Binding, card: NormalizedCard, compiled: CompiledTavernPrompt | string, narrative: string, assistantSeq: number | undefined): Promise<VariableUpdateResult | undefined> => {
+    if (assistantSeq === undefined) throw new Error("找不到当前剧情回复，未执行分步 MVU 更新");
     const target = resolveMvuExtraModel(mvuSettingsFor(binding, card), binding);
     binding.splitMvu = {
       enabled: true,
@@ -1310,14 +1384,16 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
         }
       }
       if (failure.length > 0) throw new Error(failure);
-      if (!/<UpdateVariable\b[^>]*>[\s\S]*?<\/UpdateVariable>/iu.test(body)) {
+      const updateBody = extractSplitMvuUpdateBlocks(body);
+      if (updateBody.length === 0) {
         correction = "没有返回完整的 UpdateVariable 块";
       } else {
         const variableRecord = variableStates.get(sessionId) as unknown as VariableStateRecord | undefined;
         const compatibility = variableRecord === undefined
           ? undefined
-          : applySplitMvuPatchCompatibility(variableRecord.state, body);
-        const result = await updateVariablesFromReply(sessionId, compatibility?.body ?? body);
+          : applySplitMvuPatchCompatibility(variableRecord.state, updateBody);
+        const committedBody = compatibility?.body ?? updateBody;
+        const result = await updateVariablesFromReply(sessionId, committedBody, { splitMvuAssistantSeq: assistantSeq });
         if (result?.status === "committed") {
           binding.splitMvu = { ...binding.splitMvu, status: "committed", updatedAt: new Date().toISOString() };
           await bindings.put(sessionId, binding as unknown as RecordValue);
@@ -1492,14 +1568,15 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
         ...(pending.compiled.settings.maxReplyTokens === null ? {} : { maxTokens: pending.compiled.settings.maxReplyTokens }),
       };
     });
-    agentCtx.on("agent/turn-stopping", async () => {
+    agentCtx.on("agent/turn-stopping", async ({ turn }: { turn: number }) => {
       await variableReplyGate.commit(sessionId, async (body) => {
+        const assistantSeq = assistantSeqForNarrative(ctx.sessions.get(sessionId), body, turn);
         const inline = await updateVariablesFromReply(sessionId, body);
         const updateCompiled = pendingAssemblies.get(sessionId)?.updateCompiled;
         const settings = mvuSettingsFor(binding, card);
         if (inline?.status !== "ignored" || updateCompiled === undefined || !settings.automaticRequest) return;
         try {
-          await runSplitMvuUpdate(sessionId, binding, card, updateCompiled, body);
+          await runSplitMvuUpdate(sessionId, binding, card, updateCompiled, body, assistantSeq);
         } catch (error) {
           binding.splitMvu = {
             enabled: true,
@@ -1562,7 +1639,7 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
       const renderedOpening = substituteCardMacros(opening.message, { userName: effectiveUserName(binding), characterName: card.title });
       const initial = variables.initialSnapshots[opening.id];
       if (initial === undefined || initial.status !== "initialized") throw new Error("恢复开场没有可用的初始变量快照");
-      const replay = replayMvuReplies(initial.state, assistantVariableReplies(session));
+      const replay = replayMvuReplies(initial.state, assistantVariableReplayReplies(session, variables));
       if (replay.failedReplies > 0) throw new Error(`恢复开场时有 ${replay.failedReplies} 条回复未通过原子校验，原状态未改动`);
       const nextVariables = structuredClone(variables);
       nextVariables.selectedOpeningId = opening.id;
@@ -1704,12 +1781,7 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
         await bindings.put(sessionId, binding as unknown as RecordValue);
         await ctx.sessions.flush(session);
       }
-      let assistantBody = "";
-      for await (const chunk of stream) {
-        if (chunk?.type === "text-delta" && typeof chunk.text === "string") assistantBody += chunk.text;
-        yield chunk;
-      }
-      variableReplyGate.capture(sessionId, assistantBody);
+      yield* captureAssistantTextStream(stream, (assistantBody) => variableReplyGate.capture(sessionId, assistantBody));
     })();
   }, { global: true }));
 
@@ -1935,7 +2007,7 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
         if (typeof requested !== "object" || requested === null || Array.isArray(requested)) throw new Error("缺少要保存的预设");
         let id = typeof (requested as RecordValue).id === "string" ? (requested as RecordValue).id as string : "";
         if (id.length === 0) throw new Error("缺少要保存的预设 id");
-        if (id === DEFAULT_TAVERN_PRESET.id) {
+        if (builtinPresets.has(id)) {
           id = crypto.randomUUID();
           const requestedName = typeof (requested as RecordValue).name === "string" ? (requested as RecordValue).name as string : DEFAULT_TAVERN_PRESET.name;
           const preset = normalizeTavernPreset({ ...(requested as RecordValue), revision: 1, createdAt: now, updatedAt: now }, { id, name: uniquePresetName(`${requestedName} 副本`), source: "created", now });
@@ -1972,7 +2044,7 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
       }
       if (action === "delete") {
         const presetId = typeof input.presetId === "string" ? input.presetId : "";
-        if (presetId === DEFAULT_TAVERN_PRESET.id) throw new Error("内置 Default 不可删除");
+        if (builtinPresets.has(presetId)) throw new Error("内置 Default 不可删除");
         if (storedPresets.get(presetId) === undefined) throw new Error("要删除的预设已经不存在");
         const usedBy = allBindings().filter((binding) => binding.presetId === presetId);
         if (usedBy.length > 0) {
@@ -2139,13 +2211,18 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
         if (settings.updateMethod !== "额外模型解析") throw new Error("变量更新方式不是“额外模型解析”");
         const narrative = assistantVariableReplies(ctx.sessions.get(sessionId)).at(-1);
         if (narrative === undefined) throw new Error("当前 Session 还没有可重试的剧情回复");
+        const assistantSeq = assistantSeqForNarrative(ctx.sessions.get(sessionId), narrative);
+        const variableRecord = variableStates.get(sessionId) as unknown as VariableStateRecord | undefined;
+        if (assistantSeq !== undefined && variableRecord?.splitMvuRepliesByAssistantSeq?.[String(assistantSeq)] !== undefined) {
+          throw new Error("这条剧情的分步 MVU 更新已经提交，不能重复应用");
+        }
         const compiled = pendingAssemblies.get(sessionId)?.updateCompiled
           ?? [
             "你只负责根据已经完成的剧情更新 MVU 变量，不得续写剧情。",
             ...card.worldbook.filter((entry) => /\[mvu_update\]/iu.test(entry.comment)).map((entry) => entry.content),
-            `当前变量状态：\n${JSON.stringify((variableStates.get(sessionId) as unknown as VariableStateRecord | undefined)?.state ?? {}, null, 2)}`,
+            `当前变量状态：\n${JSON.stringify(variableRecord?.state ?? {}, null, 2)}`,
           ].join("\n\n");
-        result = await runSplitMvuUpdate(sessionId, binding, card, compiled, narrative);
+        result = await runSplitMvuUpdate(sessionId, binding, card, compiled, narrative, assistantSeq);
       } else {
         throw new Error("未知的 MVU 控制动作");
       }
@@ -2185,7 +2262,12 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
     };
     const projectedMessages = binding === undefined || session === undefined
       ? []
-      : groupFrontendMessagesForNativeFlow(projectFrontendMessages(session, card.messageRegexScripts, macroValues));
+      : groupFrontendMessagesForNativeFlow(projectFrontendMessages(
+        session,
+        card.messageRegexScripts,
+        macroValues,
+        { assistantDisplayUpdates: variableRecord?.splitMvuRepliesByAssistantSeq ?? {} },
+      ));
     const regexMatches = projectedMessages.flatMap((message) => message.rawText === undefined ? [] : [{
       seq: message.seq,
       role: message.role,
@@ -2285,7 +2367,12 @@ for (const button of document.querySelectorAll('[data-scenario]')) button.addEve
       sessionId,
       title: card.title,
       revisionId: card.revisionId,
-      messages: groupFrontendMessagesForNativeFlow(projectFrontendMessages(session, card.messageRegexScripts, { userName: effectiveUserName(binding), characterName: card.title, messageVariables: variableState?.state, macroSeed: sessionId })),
+      messages: groupFrontendMessagesForNativeFlow(projectFrontendMessages(
+        session,
+        card.messageRegexScripts,
+        { userName: effectiveUserName(binding), characterName: card.title, messageVariables: variableState?.state, macroSeed: sessionId },
+        { assistantDisplayUpdates: variableState?.splitMvuRepliesByAssistantSeq ?? {} },
+      )),
       variableState: variableState?.state ?? {},
       frontendStorage: binding.frontendStorage ?? {},
       companionScripts: card.tavernHelperScripts ?? [],

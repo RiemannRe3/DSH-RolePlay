@@ -2,11 +2,22 @@ type Playability = "ready" | "degraded" | "blocked";
 type CompatibilityRow = { capability: string; disposition: "完整生效" | "等价替代" | "仅保留" | "已禁用" | "已丢失"; evidence: string };
 type RichBlock = import("./rich-message.js").RichBlock;
 type RichFrameContentMetrics = import("./rich-message.js").RichFrameContentMetrics;
+type RichFrameLayoutSnapshot = import("./rich-message.js").RichFrameLayoutSnapshot;
+type RichFrameScrollableMetrics = import("./rich-message.js").RichFrameScrollableMetrics;
+type RichFrameVisibilityNode = import("./rich-message.js").RichFrameVisibilityNode;
 type SillyTavernCompatibilityContext = import("./rich-message.js").SillyTavernCompatibilityContext;
 declare function splitRichMessage(text: string): RichBlock[];
 declare function alignProjectedRoles(flowRoles: readonly ("user" | "assistant")[], projectedRoles: readonly ("user" | "assistant")[]): Array<number | null> | null;
 declare function adaptRealCardFrontendHtml(value: string): string;
+declare function adaptTavernHelperScriptSource(value: string): string;
 declare function measureRichFrameContentHeight(metrics: RichFrameContentMetrics): number;
+declare function measureRichFrameScrollableContentBottom(bodyHeight: number, scrollables: readonly RichFrameScrollableMetrics[]): number;
+declare function isRichFrameNodeHiddenByClosedDetails(node: RichFrameVisibilityNode, boundary?: RichFrameVisibilityNode | null): boolean;
+declare function isRichFrameViewportCoupled(first: RichFrameLayoutSnapshot, second: RichFrameLayoutSnapshot): boolean;
+declare function findRichFrameViewportScrollKeys(first: RichFrameLayoutSnapshot, second: RichFrameLayoutSnapshot): string[];
+declare function areRichFrameScrollKeysStable(keys: readonly string[], first: RichFrameLayoutSnapshot, second: RichFrameLayoutSnapshot): boolean;
+declare function resolveRichFrameProbeHeight(first: RichFrameLayoutSnapshot, second: RichFrameLayoutSnapshot): number;
+declare function resolveRichFrameLayoutHeight(snapshot: RichFrameLayoutSnapshot, viewportCoupled: boolean, releasedScrollKeys?: readonly string[]): number;
 declare function clampRichFrameHeight(value: number): number;
 declare function buildSillyTavernCompatibilityContext(messageCount: number, currentMessageId: number): SillyTavernCompatibilityContext;
 declare function recoverRestoredClientSession(sessions: any, options: { sessionId: string; timeoutMs?: number; reload(): void }): Promise<"ready" | "reloaded" | "missing">;
@@ -529,7 +540,7 @@ clientWindow.__ModuleLoader__.load({
       return h("div", { className: "tavern-panel-screen tavern-setup-screen", "data-tavern-screen": "setup" },
         h("button", { type: "button", className: "tavern-back-button", onClick: openLibrary }, h(IconChevronLeftOutline14, { size: 14 }), h("span", null, card.title)),
         h("div", { className: "tavern-card-summary" }, card.coverUrl === "" ? h("span", { className: "tavern-card-thumb tavern-card-placeholder", "aria-label": "这张 JSON 卡没有随卡封面" }, card.title.slice(0, 1)) : h("img", { className: "tavern-card-thumb", src: card.coverUrl, alt: "" }), h("div", null, h("h2", null, snapshot.compatibilityOpen ? "兼容报告" : "新游戏"), h("p", null, card.summary))),
-        h("div", { className: `tavern-compatibility is-${card.playability}` }, h(StatusLine, { card }), h("p", null, card.statusDetail), h("button", { type: "button", onClick: () => patchState({ compatibilityOpen: !snapshot.compatibilityOpen }) }, snapshot.compatibilityOpen ? "收起兼容明细" : "查看兼容明细"), snapshot.compatibilityOpen ? h("div", { className: "tavern-technical-note" }, card.compatibilityRows === undefined ? "这是 #101 留下的界面样例；导入真实 PNG/JSON 后，这里会逐项显示静态证据。" : h("ul", null, ...card.compatibilityRows.map((row, index) => h("li", { key: `${row.capability}-${index}` }, h("strong", null, `${row.capability} · ${row.disposition}`), h("span", null, row.evidence))), card.sourceDigest === undefined ? null : h("p", null, `原件 SHA-256：${card.sourceDigest}`))) : null),
+        h("div", { className: `tavern-compatibility is-${card.playability}` }, h(StatusLine, { card }), h("p", null, card.statusDetail), h("button", { type: "button", onClick: () => patchState({ compatibilityOpen: !snapshot.compatibilityOpen }) }, snapshot.compatibilityOpen ? "收起兼容明细" : "查看兼容明细"), snapshot.compatibilityOpen ? h("div", { className: "tavern-technical-note" }, card.compatibilityRows === undefined ? "导入真实 PNG/JSON 后，这里会逐项显示静态兼容证据。" : h("ul", null, ...card.compatibilityRows.map((row, index) => h("li", { key: `${row.capability}-${index}` }, h("strong", null, `${row.capability} · ${row.disposition}`), h("span", null, row.evidence))), card.sourceDigest === undefined ? null : h("p", null, `原件 SHA-256：${card.sourceDigest}`))) : null),
         snapshot.startError ? h("div", { className: "tavern-start-error", role: "alert" }, snapshot.startError) : null,
         blocked ? h("div", { className: "tavern-panel-footer is-blocked" }, h("p", null, "解决必需依赖后才能创建会话")) : h("div", { className: "tavern-form-section" },
           h("label", null, h("span", null, "玩家称呼"), h("input", { value: snapshot.userName, maxLength: 80, onChange: (event: { target: { value: string } }) => patchState({ userName: event.target.value }) })),
@@ -1106,11 +1117,10 @@ clientWindow.__ModuleLoader__.load({
           h("details", { className: "tavern-preset-advanced" },
             h("summary", null, h("strong", null, "高级设置")),
             h("div", { className: "tavern-preset-advanced-body" },
-              h("p", { className: "tavern-preset-runtime-note" }, "DeepSeek 默认：温度 1 · Top P 1。当前 DSH 仅保存 Top P 以兼容 SillyTavern JSON；实际请求由当前提供方支持的参数决定。"),
               h("div", { className: "tavern-preset-samplers" },
                 slider("temperature", "温度", 0, 2, 0.01),
                 slider("topP", "Top P", 0, 1, 0.01)),
-              h("button", { type: "button", className: "tavern-preset-reset-sampling", onClick: () => updateDraft((value) => { value.settings.temperature = 1; value.settings.topP = 1; }) }, "恢复 DeepSeek 默认值"))),
+              h("button", { type: "button", className: "tavern-preset-reset-sampling", onClick: () => updateDraft((value) => { value.settings.temperature = 1; value.settings.topP = 1; }) }, "恢复默认值"))),
           h("section", { className: "tavern-preset-prompts" },
             h("nav", { className: "tavern-preset-prompt-nav", "aria-label": "提示词" },
               h("header", null,
@@ -1798,9 +1808,45 @@ clientWindow.__ModuleLoader__.load({
     // rich documents into an already-bound Tavern Session. This DOM seam is
     // isolated so a future conditional message slot can replace it without
     // touching the card, Session, or runtime contracts.
-    type NativeRichMount = { item: HTMLElement; original: HTMLElement; display: HTMLElement; root: any; signature: string };
+    type NativeRichMount = { item: HTMLElement; original: HTMLElement; display: HTMLElement; root: any; signature: string; messageSeq: number };
+    type RichFrameProbePhase = "idle" | "first" | "second" | "verify" | "verify-second" | "refresh" | "settled";
+    type RichFrameSizingState = {
+      probeId: number;
+      phase: RichFrameProbePhase;
+      expectedHeight: number;
+      baseHeight: number;
+      committedHeight: number;
+      first?: RichFrameLayoutSnapshot;
+      verificationFirst?: RichFrameLayoutSnapshot;
+      layoutVersion?: number;
+      viewportCoupled: boolean;
+      releasedScrollKeys: string[];
+      releaseBasisKeys: string[];
+      verificationAttempts: number;
+      cycleStartedAt?: number;
+      restartAttempts: number;
+      timer?: number;
+      publishFrame?: number;
+      measurementTimer?: number;
+      fallbackRetryTimer?: number;
+      pendingProbe: boolean;
+      pendingReason?: string;
+      pendingLayoutVersion?: number;
+      scheduledReason?: string;
+      settled: boolean;
+      fallbackLatched: boolean;
+      suppressResizeUntil: number;
+    };
+    type RichFrameRegistration = {
+      token: string;
+      frame: HTMLIFrameElement;
+      sessionId: string;
+      readonly revisionId: string;
+      documentEpoch?: string;
+      sizing?: RichFrameSizingState;
+    };
 
-    function nativeRichSrcDoc(content: string, token: string, variableState: Record<string, unknown>, frontendStorage: Record<string, string>, cardTitle: string, messageCount: number): string {
+    function nativeRichSrcDoc(content: string, token: string, variableState: Record<string, unknown>, frontendStorage: Record<string, string>, cardTitle: string, messageCount: number, revisionId = ""): string {
       const adapted = adaptRealCardFrontendHtml(content)
         .replaceAll("window.parent.frontendTestHost", "window.__dshGameHost")
         .replaceAll("window.parent.frontendTestStateHost", "window.__dshGameStateHost");
@@ -1808,21 +1854,44 @@ clientWindow.__ModuleLoader__.load({
       const encodedState = JSON.stringify(variableState).replace(/</gu, "\\u003c").replace(/\u2028/gu, "\\u2028").replace(/\u2029/gu, "\\u2029");
       const encodedStorage = JSON.stringify(frontendStorage).replace(/</gu, "\\u003c").replace(/\u2028/gu, "\\u2028").replace(/\u2029/gu, "\\u2029");
       const encodedTitle = JSON.stringify(cardTitle).replace(/</gu, "\\u003c");
+      const encodedRevision = JSON.stringify(revisionId).replace(/</gu, "\\u003c");
       const encodedHeightMeasure = measureRichFrameContentHeight.toString().replace(/<\//gu, "<\\/");
+      const encodedScrollableMeasure = measureRichFrameScrollableContentBottom.toString().replace(/<\//gu, "<\\/");
+      const encodedClosedDetailsVisibility = isRichFrameNodeHiddenByClosedDetails.toString().replace(/<\//gu, "<\\/");
       const encodedContextBuilder = buildSillyTavernCompatibilityContext.toString().replace(/<\//gu, "<\\/");
       const baseHref = new URL(".", window.location.href).href.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
       const messageId = Number(token.split(":", 1)[0]) || -1;
       const bootstrap = `<script>(()=>{
-const token=${encodedToken};
-const cardTitle=${encodedTitle};
-let currentMessageId=${messageId};
-let messageCount=${messageCount};
-const companion=token.startsWith('companion:');
-let cardState=${encodedState};
+ const token=${encodedToken};
+ const cardTitle=${encodedTitle};
+ const cardRevision=${encodedRevision};
+ let currentMessageId=${messageId};
+ let messageCount=${messageCount};
+ const companion=token.startsWith('companion:');
+ const hostWindow=globalThis;
+ const window=hostWindow;
+ const document=hostWindow.document;
+ document.documentElement.dataset.dshRevision=cardRevision;
+ const parent=hostWindow.parent;
+ const performance=hostWindow.performance;
+ const crypto=hostWindow.crypto;
+ const console=hostWindow.console;
+ const requestAnimationFrame=hostWindow.requestAnimationFrame.bind(hostWindow);
+ const setTimeout=hostWindow.setTimeout.bind(hostWindow);
+ const clearTimeout=hostWindow.clearTimeout.bind(hostWindow);
+ const setInterval=hostWindow.setInterval.bind(hostWindow);
+ const addEventListener=hostWindow.addEventListener.bind(hostWindow);
+ const getComputedStyle=hostWindow.getComputedStyle.bind(hostWindow);
+ const structuredClone=hostWindow.structuredClone.bind(hostWindow);
+ const {Array,Blob,CustomEvent,Error,Event,EventTarget,JSON,Map,Math,MutationObserver,NodeFilter,Number,Object,Promise,RegExp,ResizeObserver,Set,String,URL,WeakMap}=hostWindow;
+ let cardState=${encodedState};
 const storageEntries=new Map(Object.entries(${encodedStorage}));
+const runtimeEpoch=crypto.randomUUID?.()||String(Date.now())+'-'+Math.random().toString(36).slice(2);
 let nextId=0;
 const pending=new Map();
 const measureRichFrameContentHeight=${encodedHeightMeasure};
+const measureRichFrameScrollableContentBottom=${encodedScrollableMeasure};
+const isRichFrameNodeHiddenByClosedDetails=${encodedClosedDetailsVisibility};
 const buildSillyTavernCompatibilityContext=${encodedContextBuilder};
 const clone=value=>value===undefined?undefined:JSON.parse(JSON.stringify(value));
 const merge=(left,right)=>{const out=clone(left||{});for(const [key,value] of Object.entries(right||{})){out[key]=value&&typeof value==='object'&&!Array.isArray(value)&&out[key]&&typeof out[key]==='object'&&!Array.isArray(out[key])?merge(out[key],value):clone(value)}return out};
@@ -1874,12 +1943,20 @@ class MiniQuery{
 }
 function miniDollar(input){if(typeof input==='function'){const run=()=>input(miniDollar);if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',run,{once:true});else queueMicrotask(run);return new MiniQuery([])}if(input instanceof MiniQuery)return input;if(typeof input==='string')return new MiniQuery(selectNodes(input));if(input==null)return new MiniQuery([]);return new MiniQuery(Array.isArray(input)?input:[input])}
 const operation=kind=>'card-ui:'+kind+':'+(crypto.randomUUID?.()||Date.now()+':'+(++nextId));
-function send(action,payload={}){const id=++nextId;parent.postMessage({source:'dsh-re3-rp-rich-frame',token,kind:'request',id,action,payload},'*');return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}));}
+function send(action,payload={}){const id=runtimeEpoch+':'+(++nextId);parent.postMessage({source:'dsh-re3-rp-rich-frame',token,kind:'request',id,action,payload},'*');return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}));}
 const observeCompatibilityCall=(surface,method)=>{void send('reportCompatibilityCall',{surface,method,operationId:operation('compat-call')}).catch(()=>{})};
 let storageTimer;
-const persistStorage=()=>{clearTimeout(storageTimer);storageTimer=setTimeout(()=>{void send('replaceCardStorage',{entries:Object.fromEntries(storageEntries)}).catch(()=>{})},40)};
-const memoryStorage=Object.freeze({get length(){return storageEntries.size},key(index){return [...storageEntries.keys()][Number(index)]??null},getItem(key){const value=storageEntries.get(String(key));return value===undefined?null:value},setItem(key,value){storageEntries.set(String(key),String(value));persistStorage()},removeItem(key){storageEntries.delete(String(key));persistStorage()},clear(){storageEntries.clear();persistStorage()}});
+let storageWriteVersion=0;
+let storageAckVersion=0;
+let storageInFlightVersion=0;
+let storagePendingWrite;
+const applyCanonicalStorage=entries=>{storageEntries.clear();for(const [key,value] of Object.entries(entries||{}))storageEntries.set(String(key),String(value))};
+const runStorageWrite=()=>{if(storageInFlightVersion!==0||!storagePendingWrite)return;const write=storagePendingWrite;storagePendingWrite=undefined;storageInFlightVersion=write.version;void send('replaceCardStorage',{mutations:write.mutations}).then(result=>{storageAckVersion=Math.max(storageAckVersion,write.version);if(write.version===storageWriteVersion)applyCanonicalStorage(result?.entries)}).catch(()=>{if(write.attempt<3){const retry={...write,attempt:write.attempt+1};storagePendingWrite=storagePendingWrite?{version:storagePendingWrite.version,mutations:[...retry.mutations,...storagePendingWrite.mutations],attempt:Math.max(retry.attempt,storagePendingWrite.attempt)}:retry}}).finally(()=>{storageInFlightVersion=0;if(storagePendingWrite){clearTimeout(storageTimer);storageTimer=setTimeout(runStorageWrite,storagePendingWrite.attempt>0?120:0)}})};
+const flushStorage=()=>{clearTimeout(storageTimer);storageTimer=undefined;runStorageWrite()};
+const persistStorage=mutation=>{storageWriteVersion+=1;storagePendingWrite=storagePendingWrite?{...storagePendingWrite,version:storageWriteVersion,mutations:[...storagePendingWrite.mutations,mutation]}:{version:storageWriteVersion,mutations:[mutation],attempt:0};clearTimeout(storageTimer);storageTimer=setTimeout(flushStorage,40)};
+const memoryStorage=Object.freeze({get length(){return storageEntries.size},key(index){return [...storageEntries.keys()][Number(index)]??null},getItem(key){const value=storageEntries.get(String(key));return value===undefined?null:value},setItem(key,value){const normalizedKey=String(key);const normalizedValue=String(value);storageEntries.set(normalizedKey,normalizedValue);persistStorage({kind:'set',key:normalizedKey,value:normalizedValue})},removeItem(key){const normalizedKey=String(key);storageEntries.delete(normalizedKey);persistStorage({kind:'remove',key:normalizedKey})},clear(){storageEntries.clear();persistStorage({kind:'clear'})}});
 try{Object.defineProperty(window,'localStorage',{value:memoryStorage,configurable:false})}catch{}
+addEventListener('pagehide',()=>{if(storageAckVersion>=storageWriteVersion)return;flushStorage();if(storagePendingWrite){const write=storagePendingWrite;storagePendingWrite=undefined;void send('replaceCardStorage',{mutations:write.mutations}).catch(()=>{})}});
 addEventListener('message',event=>{const data=event.data;if(event.source!==parent||data?.source!=='dsh-re3-rp-rich-host'||data.token!==token||data.kind!=='response')return;const task=pending.get(data.id);if(!task)return;pending.delete(data.id);if(data.ok)task.resolve(data.result);else task.reject(Object.assign(new Error(data.error?.message||'Bridge unavailable'),{code:data.error?.code||'bridge_unavailable'}));});
 let lastReportedHeight=0;
 const visibleFixedNode=node=>{const style=getComputedStyle(node);const rect=node.getBoundingClientRect();return style.position==='fixed'&&style.display!=='none'&&style.visibility!=='hidden'&&style.pointerEvents!=='none'&&rect.width>0&&rect.height>0};
@@ -1888,10 +1965,37 @@ const hasFixedAncestor=node=>{let parent=node.parentElement;while(parent&&parent
 const fixedNodeScore=node=>{const rect=node.getBoundingClientRect();const z=Number.parseInt(getComputedStyle(node).zIndex,10)||0;return z*100000000+rect.width*rect.height};
 const discoverCompanionTarget=()=>{const explicit=document.querySelector('[data-dsh-companion-root]');if(explicit)return explicit;const viewportArea=Math.max(1,innerWidth*innerHeight);return fixedCompanionNodes().filter(node=>!hasFixedAncestor(node)).filter(node=>{const rect=node.getBoundingClientRect();const viewportCoverage=rect.width*rect.height/viewportArea;return viewportCoverage<0.98&&(rect.width<innerWidth*0.95||rect.height<innerHeight*0.95)}).sort((left,right)=>fixedNodeScore(right)-fixedNodeScore(left))[0]};
 const discoverCompanionDragLayer=target=>{const explicit=document.querySelector('[data-dsh-drag-overlay]');if(explicit)return explicit;return fixedCompanionNodes().filter(node=>node!==target).filter(node=>{const rect=node.getBoundingClientRect();return rect.width>=innerWidth*0.9&&rect.height>=innerHeight*0.9}).sort((left,right)=>fixedNodeScore(right)-fixedNodeScore(left))[0]};
-const report=()=>{if(companion){const target=discoverCompanionTarget();const rect=target?.getBoundingClientRect();const dragOverlay=discoverCompanionDragLayer(target);const dragRect=dragOverlay?.getBoundingClientRect();const active=target!==null&&target!==undefined&&rect!==undefined&&visibleFixedNode(target);const dragging=dragOverlay!==null&&dragOverlay!==undefined&&dragRect!==undefined&&visibleFixedNode(dragOverlay);const x=active?Math.floor(rect.left):0;const y=active?Math.floor(rect.top):0;const width=active?Math.ceil(rect.width):0;const height=active?Math.ceil(rect.height):0;const signature=(active?'on:':'off:')+(dragging?'drag:':'rest:')+x+':'+y+':'+width+':'+height;if(signature===lastReportedHeight)return;lastReportedHeight=signature;parent.postMessage({source:'dsh-re3-rp-rich-frame',token,kind:'overlay',active,dragging,x,y,width,height},'*');return}const body=document.body;const rect=body.getBoundingClientRect();const nestedScrollableOverflowHeight=[...body.querySelectorAll('*')].reduce((total,node)=>{const clientHeight=Number(node.clientHeight)||0;const scrollHeight=Number(node.scrollHeight)||0;if(scrollHeight<=clientHeight)return total;const nodeRect=node.getBoundingClientRect();if(nodeRect.width<=0&&nodeRect.height<=0)return total;const style=getComputedStyle(node);if(style.overflowY==='auto'||style.overflowY==='scroll')return total+scrollHeight-clientHeight;return total},0);const height=measureRichFrameContentHeight({bodyScrollHeight:body.scrollHeight,bodyOffsetHeight:body.offsetHeight,bodyRectTop:rect.top,bodyRectBottom:rect.bottom,nestedScrollableOverflowHeight});if(height===lastReportedHeight)return;lastReportedHeight=height;parent.postMessage({source:'dsh-re3-rp-rich-frame',token,kind:'resize',height},'*')};
-const scheduleReport=()=>requestAnimationFrame(report);
-addEventListener('load',scheduleReport);new ResizeObserver(scheduleReport).observe(document.body);new MutationObserver(scheduleReport).observe(document.body,{attributes:true,childList:true,subtree:true});
+const reportCompanion=()=>{const target=discoverCompanionTarget();const rect=target?.getBoundingClientRect();const dragOverlay=discoverCompanionDragLayer(target);const dragRect=dragOverlay?.getBoundingClientRect();const active=target!==null&&target!==undefined&&rect!==undefined&&visibleFixedNode(target);const dragging=dragOverlay!==null&&dragOverlay!==undefined&&dragRect!==undefined&&visibleFixedNode(dragOverlay);const x=active?Math.floor(rect.left):0;const y=active?Math.floor(rect.top):0;const width=active?Math.ceil(rect.width):0;const height=active?Math.ceil(rect.height):0;const signature=(active?'on:':'off:')+(dragging?'drag:':'rest:')+x+':'+y+':'+width+':'+height;if(signature===lastReportedHeight)return;lastReportedHeight=signature;parent.postMessage({source:'dsh-re3-rp-rich-frame',token,kind:'overlay',active,dragging,x,y,width,height},'*')};
+let companionReportFrame;
+const scheduleCompanionReport=()=>{if(companionReportFrame!==undefined)return;companionReportFrame=requestAnimationFrame(()=>{companionReportFrame=undefined;reportCompanion()})};
+let layoutVersion=0;
+let invalidationTimer;
+let invalidationReason='resize';
+const scheduleLayoutInvalidation=reason=>{if(companion)return;invalidationReason=reason==='resize'&&invalidationReason!=='resize'?invalidationReason:reason;if(invalidationTimer!==undefined)return;invalidationTimer=setTimeout(()=>{invalidationTimer=undefined;const currentReason=invalidationReason;invalidationReason='resize';const snapshot=collectLayoutSnapshot();parent.postMessage({source:'dsh-re3-rp-rich-frame',token,kind:'layout-invalidated',reason:currentReason,layoutVersion,height:snapshot.contentBottom,snapshot},'*')},0)};
+const report=()=>companion?reportCompanion():scheduleLayoutInvalidation('mutation');
+const scheduleReport=()=>companion?scheduleCompanionReport():scheduleLayoutInvalidation('mutation');
+const scrollNodeIds=new WeakMap();
+let nextScrollNodeId=0;
+const scrollNodeKey=node=>{let id=scrollNodeIds.get(node);if(id===undefined){id=++nextScrollNodeId;scrollNodeIds.set(node,id)}return String(id)};
+const visibleLayoutNode=(node,style,rect)=>!isRichFrameNodeHiddenByClosedDetails(node,document.body)&&style.display!=='none'&&style.visibility!=='hidden'&&style.visibility!=='collapse'&&style.contentVisibility!=='hidden'&&style.position!=='fixed'&&node.getClientRects().length>0&&(rect.width>0||rect.height>0);
+const collectScrollableOwners=(node,styleFor)=>{const owners=[];let parent=node.parentElement;let depth=0;while(parent&&parent!==document.body&&parent!==document.documentElement&&depth<100){const style=styleFor(parent);if(style.position==='fixed')owners.push({key:scrollNodeKey(parent),kind:'fixed',clientHeight:Number(parent.clientHeight)||0});if(style.overflowY==='hidden'||style.overflowY==='clip')owners.push({key:scrollNodeKey(parent),kind:'clip',clientHeight:Number(parent.clientHeight)||0});if(style.overflowY==='auto'||style.overflowY==='scroll')owners.push({key:scrollNodeKey(parent),kind:'scroll',clientHeight:Number(parent.clientHeight)||0});parent=parent.parentElement;depth+=1}return owners.slice(0,100)};
+const collectLayoutSnapshot=()=>{const body=document.body;const rect=body.getBoundingClientRect();const bodyMetrics={bodyScrollHeight:body.scrollHeight,bodyOffsetHeight:body.offsetHeight,bodyRectTop:rect.top,bodyRectBottom:rect.bottom};const bodyHeight=measureRichFrameContentHeight(bodyMetrics);const styleCache=new Map();const styleFor=node=>{let style=styleCache.get(node);if(style===undefined){style=getComputedStyle(node);styleCache.set(node,style)}return style};const nodes=[];const walker=document.createTreeWalker(body,NodeFilter.SHOW_ELEMENT);while(nodes.length<5000){const node=walker.nextNode();if(node===null)break;nodes.push(node)}const scrollables=[];for(const node of nodes){const style=styleFor(node);if(!(style.overflowY==='auto'||style.overflowY==='scroll'))continue;const nodeRect=node.getBoundingClientRect();const visible=visibleLayoutNode(node,style,nodeRect);scrollables.push({key:scrollNodeKey(node),visible,top:nodeRect.top-rect.top,clientHeight:Number(node.clientHeight)||0,scrollHeight:Number(node.scrollHeight)||0,owners:collectScrollableOwners(node,styleFor)})}const scrollableBottom=measureRichFrameScrollableContentBottom(bodyHeight,scrollables);const nestedScrollableOverflowHeight=Math.max(0,scrollableBottom-bodyHeight);const contentBottom=measureRichFrameContentHeight({...bodyMetrics,nestedScrollableOverflowHeight});return{viewportHeight:innerHeight,bodyHeight,contentBottom,layoutVersion,scrollables}};
+const postLayoutMeasure=(probeId,phase,expectedViewportHeight)=>{setTimeout(()=>{const snapshot=collectLayoutSnapshot();parent.postMessage({source:'dsh-re3-rp-rich-frame',token,kind:'resize',probeId,phase,expectedViewportHeight,height:snapshot.contentBottom,snapshot},'*')},0)};
+addEventListener('message',event=>{const data=event.data;if(event.source!==parent||data?.source!=='dsh-re3-rp-rich-host'||data.token!==token||data.kind!=='measure-layout')return;const probeId=Number(data.probeId);const expectedViewportHeight=Number(data.expectedViewportHeight);if(!Number.isSafeInteger(probeId)||!Number.isFinite(expectedViewportHeight))return;postLayoutMeasure(probeId,data.phase,expectedViewportHeight)});
+addEventListener('message',event=>{const data=event.data;if(event.source!==parent||data?.source!=='dsh-re3-rp-rich-host'||data.token!==token||data.kind!=='set-overflow-mode')return;document.documentElement.dataset.dshOverflowMode=data.mode==='inner'?'inner':'outer'});
+addEventListener('message',event=>{const data=event.data;if(event.source!==parent||data?.source!=='dsh-re3-rp-rich-host'||data.token!==token||data.kind!=='host-ready')return;scheduleLayoutInvalidation('load')});
+addEventListener('load',()=>{if(companion){scheduleCompanionReport();parent.postMessage({source:'dsh-re3-rp-rich-frame',token,kind:'frame-ready',epoch:runtimeEpoch},'*');return}const snapshot=collectLayoutSnapshot();parent.postMessage({source:'dsh-re3-rp-rich-frame',token,kind:'frame-ready',epoch:runtimeEpoch,height:snapshot.contentBottom,snapshot},'*');scheduleLayoutInvalidation('load')});
 if(companion)setInterval(report,120);
+else{
+  let observedViewportHeight=innerHeight;
+  let mutationTimer;
+  let mutationBurstStartedAt=0;
+  const scheduleMutationInvalidation=()=>{const now=performance.now();if(mutationBurstStartedAt===0)mutationBurstStartedAt=now;clearTimeout(mutationTimer);const delay=now-mutationBurstStartedAt>=750?0:96;mutationTimer=setTimeout(()=>{mutationTimer=undefined;mutationBurstStartedAt=0;layoutVersion+=1;scheduleLayoutInvalidation('mutation')},delay)};
+  new ResizeObserver(()=>{const viewportHeight=innerHeight;const viewportChanged=Math.abs(viewportHeight-observedViewportHeight)>2;observedViewportHeight=viewportHeight;if(!viewportChanged)layoutVersion+=1;scheduleLayoutInvalidation(viewportChanged?'resize':'content')}).observe(document.body);
+  new MutationObserver(records=>{if(records.every(record=>record.target===document.documentElement&&record.type==='attributes'&&record.attributeName==='data-dsh-overflow-mode'))return;scheduleMutationInvalidation()}).observe(document.documentElement,{attributes:true,characterData:true,childList:true,subtree:true});
+  document.addEventListener('load',event=>{if(event.target!==document){layoutVersion+=1;scheduleLayoutInvalidation('load')}},true);
+  document.fonts?.addEventListener?.('loadingdone',()=>{layoutVersion+=1;scheduleLayoutInvalidation('font')});
+}
 const setDraft=text=>send('setDraft',{text:String(text??'')});
 const submitTurn=text=>send('submitTurn',{text:String(text??''),operationId:operation('turn')});
 let draft='';
@@ -1931,12 +2035,12 @@ const audioSettings={bgm:{enabled:false}};
 const getAudioSettings=channel=>clone(audioSettings[String(channel)]||{});
 const setAudioSettings=(channel,value)=>{audioSettings[String(channel)]=merge(audioSettings[String(channel)]||{},value||{});return getAudioSettings(channel)};
 Object.assign(window,{_:lodash,$:miniDollar,jQuery:miniDollar,__dshCompatDocument:compatDocument,__dshSillyTavern:silly,__dshTavernHelper:helper,__dshMvu:mvu,TavernHelper:helper,SillyTavern:silly,Mvu:mvu,tavern_events:tavernEvents,triggerSlash,_triggerSlash:triggerSlash,generate,initializeGlobal,waitGlobalInitialized,errorCatched,eventOn,eventEmit,getAllVariables,getVariables,replaceVariables,insertOrAssignVariables,getChatMessages,setChatMessages,getCurrentMessageId:()=>currentMessageId,getWorldbook,getWorldbookNames,getCharWorldbookNames,updateWorldbookWith,replaceWorldbook,rebindCharWorldbooks,createWorldbookEntries,getTavernVersion:()=> '1.18.0',getTavernHelperVersion:()=> '4.9.3-dsh.1',getAudioSettings,setAudioSettings,replaceAudioList:async()=>{},playAudio:async()=>{},toastr:{success(){},error(){},warning(){},info(){}}});
-addEventListener('message',event=>{const data=event.data;if(event.source!==parent||data?.source!=='dsh-re3-rp-rich-host'||data.token!==token||data.kind!=='projection')return;cardState=clone(data.state||{});messageCount=Number(data.messageCount)||messageCount;currentMessageId=Number(data.currentMessageId)||currentMessageId;sillyContext.chat=Array.from({length:Math.max(0,messageCount)},()=>({}));sillyContext.chatId=currentMessageId;eventEmit(tavernEvents.MESSAGE_RECEIVED,{message_id:currentMessageId});eventEmit(mvuEvents.VARIABLE_UPDATE_ENDED,{stat_data:clone(cardState)});scheduleReport()});
+addEventListener('message',event=>{const data=event.data;if(event.source!==parent||data?.source!=='dsh-re3-rp-rich-host'||data.token!==token||data.kind!=='projection')return;cardState=clone(data.state||{});if(storageAckVersion>=storageWriteVersion&&data.storage&&typeof data.storage==='object')applyCanonicalStorage(data.storage);const nextMessageCount=Number(data.messageCount);if(Number.isSafeInteger(nextMessageCount)&&nextMessageCount>=0)messageCount=nextMessageCount;const nextMessageId=Number(data.currentMessageId);if(Number.isSafeInteger(nextMessageId))currentMessageId=nextMessageId;sillyContext.chat=Array.from({length:Math.max(0,messageCount)},()=>({}));sillyContext.chatId=currentMessageId;eventEmit(tavernEvents.MESSAGE_RECEIVED,{message_id:currentMessageId});eventEmit(mvuEvents.VARIABLE_UPDATE_ENDED,{stat_data:clone(cardState)});scheduleReport()});
 addEventListener('message',event=>{const data=event.data;if(event.source!==parent||data?.source!=='dsh-re3-rp-rich-host'||data.token!==token||data.kind!=='global-published'||typeof data.name!=='string')return;try{const key=globalName(data.name);window[key]=data.value;document.documentElement.dataset.dshGlobalResolved=key}catch{}});
 addEventListener('message',event=>{const data=event.data;if(!companion||event.source!==parent||data?.source!=='dsh-re3-rp-rich-host'||data.token!==token||data.kind!=='global-read')return;const name=String(data.name??'');let found=false;let value;try{if(name in window){value=window[name];found=true}else if(/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)){value=eval(name);found=true}value=found?structuredClone(value):undefined}catch{found=false;value=undefined}parent.postMessage({source:'dsh-re3-rp-rich-frame',token,kind:'global-value',id:data.id,requesterToken:data.requesterToken,found,value},'*')});
 window.__dshGameHost=Object.freeze({submitTurn:payload=>send('submitTurn',payload)});
 window.__dshGameStateHost=Object.freeze({async getProjection(){const value=await send('getProjection');return{...value.state,state_digest:value.stateDigest}},subscribe(){return()=>{}},submitStateAction:payload=>send('submitStateAction',payload)});
-addEventListener('click',async event=>{const button=event.target.closest?.('[data-mm-action="ring-east-bell"]');if(!button)return;const status=button.closest('[data-mm-marker]')?.querySelector('[data-mm-status]');button.disabled=true;if(status)status.textContent='正在提交正式行动…';try{const receipt=await window.__dshGameHost.submitTurn({text:'我握住铜钥匙，拉响东塔警铃。',operationId:'mm-watch-u1'});if(status){status.dataset.committed=String(receipt.committed===true);status.textContent=receipt.committed?'行动与新回复已进入同一聊天。':'宿主未确认提交。'}}catch(error){if(status){status.dataset.error=error.code||'bridge_unavailable';status.textContent='提交失败：'+status.dataset.error}}finally{button.disabled=false;report()}});
+addEventListener('click',async event=>{const button=event.target.closest?.('[data-mm-action="ring-east-bell"]');if(!button)return;const status=button.closest('[data-mm-marker]')?.querySelector('[data-mm-status]');button.disabled=true;if(status)status.textContent='正在提交正式行动…';try{const receipt=await window.__dshGameHost.submitTurn({text:'我握住铜钥匙，拉响东塔警铃。',operationId:'mm-watch-u1'});if(status){status.dataset.committed=String(receipt.committed===true);status.textContent=receipt.committed?'行动与新回复已进入同一聊天。':'宿主未确认提交。'}}catch(error){if(status){status.dataset.error=error.code||'bridge_unavailable';status.textContent='提交失败：'+status.dataset.error}}finally{button.disabled=false;scheduleReport()}});
 })();<\/script>`;
       // TavernHelper cards commonly compile Vue applications as external-global
       // bundles. SillyTavern provides these globals at page scope; each DSH card
@@ -1945,49 +2049,421 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
       // authored frontends still decide whether to use any of these libraries.
       const commonFrontendGlobals = `<script src="https://testingcf.jsdelivr.net/npm/vue@3.5.21/dist/vue.global.prod.js"><\/script><script src="https://testingcf.jsdelivr.net/npm/vue-router@4.5.1/dist/vue-router.global.prod.js"><\/script><script src="https://testingcf.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"><\/script><script>if(window.jsyaml&&!window.YAML)window.YAML=Object.freeze({...window.jsyaml,parse:window.jsyaml.load,stringify:window.jsyaml.dump});<\/script>`;
       const runtimeDiagnostics = `<script>(()=>{const token=${encodedToken};const record=value=>{const message=String(value);const write=()=>{const node=document.createElement('pre');node.hidden=true;node.dataset.dshRuntimeError='';node.textContent=message;document.body.appendChild(node)};document.body?write():addEventListener('DOMContentLoaded',write,{once:true});parent.postMessage({source:'dsh-re3-rp-rich-frame',token,kind:'runtime-error',message},'*')};const originalError=console.error.bind(console);console.error=(...values)=>{originalError(...values);record(values.map(value=>value?.stack||value).join(' '))};addEventListener('error',event=>record(event.message||event.error||'Card script error'),true);addEventListener('unhandledrejection',event=>record(event.reason||'Unhandled card rejection'))})();<\/script>`;
-      return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><base href="${baseHref}"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html{height:auto!important;min-height:0!important;margin:0;overflow-x:hidden!important;overflow-y:hidden!important;background:transparent;color-scheme:light dark}body{height:auto!important;min-height:0!important;margin:0;overflow-x:hidden!important;overflow-y:visible!important;background:transparent;font-family:system-ui,-apple-system,"Segoe UI","PingFang SC",sans-serif}</style>${runtimeDiagnostics}${commonFrontendGlobals}</head><body>${bootstrap}${adapted}</body></html>`;
+      return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><base href="${baseHref}"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html{height:auto!important;min-height:0!important;margin:0;overflow-x:hidden!important;overflow-y:hidden!important;max-width:100%!important;background:transparent;color-scheme:light dark}body{height:auto!important;min-height:0!important;margin:0;overflow-x:hidden!important;overflow-y:hidden!important;max-width:100%!important;background:transparent;font-family:system-ui,-apple-system,"Segoe UI","PingFang SC",sans-serif}html[data-dsh-overflow-mode="inner"],html[data-dsh-overflow-mode="inner"] body{overflow-y:auto!important}</style>${runtimeDiagnostics}${commonFrontendGlobals}</head><body>${bootstrap}${adapted}</body></html>`;
     }
 
-    function NativeRichFrame(props: { content: string; token: string; variableState: Record<string, unknown>; frontendStorage: Record<string, string>; cardTitle: string; messageCount: number; register: (token: string, frame: HTMLIFrameElement | null) => void }): any {
-      const source = `data:text/html;charset=utf-8,${encodeURIComponent(nativeRichSrcDoc(props.content, props.token, props.variableState, props.frontendStorage, props.cardTitle, props.messageCount))}`;
-      return h("iframe", {
-        className: "tavern-native-rich-frame",
-        title: "卡片生成的消息前端",
-        // A data document keeps a unique opaque origin while allow-same-origin
-        // restores the inline handlers and Web Storage semantics used by real
-        // Tavern card UIs. The card still cannot read the DSH parent document.
-        // Real Tavern setup UIs commonly gate their final submit behind
-        // confirm(). Keep the frame isolated from the Host while allowing that
-        // explicit player confirmation to unblock the narrow Bridge action.
-        sandbox: "allow-scripts allow-same-origin allow-modals",
-        scrolling: "no",
-        src: source,
-        referrerPolicy: "no-referrer",
-        "data-tavern-rich-token": props.token,
-        ref: (frame: HTMLIFrameElement | null) => props.register(props.token, frame),
+    function postRichFrameReady(frame: HTMLIFrameElement, token: string): void {
+      frame.contentWindow?.postMessage({
+        source: "dsh-re3-rp-rich-host",
+        token,
+        kind: "host-ready",
+      }, "*");
+    }
+
+    function createRichFrameSizingState(): RichFrameSizingState {
+      return {
+        probeId: 0,
+        phase: "idle",
+        expectedHeight: 72,
+        baseHeight: 72,
+        committedHeight: 72,
+        viewportCoupled: false,
+        releasedScrollKeys: [],
+        releaseBasisKeys: [],
+        verificationAttempts: 0,
+        restartAttempts: 0,
+        pendingProbe: false,
+        settled: false,
+        fallbackLatched: false,
+        suppressResizeUntil: 0,
+      };
+    }
+
+    function disposeRichFrameSizing(registration: RichFrameRegistration | undefined): void {
+      const sizing = registration?.sizing;
+      if (sizing === undefined) return;
+      if (sizing.timer !== undefined) window.clearTimeout(sizing.timer);
+      if (sizing.publishFrame !== undefined) cancelAnimationFrame(sizing.publishFrame);
+      if (sizing.measurementTimer !== undefined) window.clearTimeout(sizing.measurementTimer);
+      if (sizing.fallbackRetryTimer !== undefined) window.clearTimeout(sizing.fallbackRetryTimer);
+    }
+
+    function getRichFrameShell(registration: RichFrameRegistration): HTMLElement | null {
+      const shell = registration.frame.parentElement;
+      return shell instanceof HTMLElement && shell.classList.contains("tavern-native-rich-frame-shell") ? shell : null;
+    }
+
+    function lockRichFrameShell(registration: RichFrameRegistration): void {
+      const sizing = registration.sizing;
+      const shell = getRichFrameShell(registration);
+      if (sizing === undefined || shell === null || !sizing.settled) return;
+      shell.style.height = `${clampRichFrameHeight(shell.getBoundingClientRect().height)}px`;
+      shell.dataset.tavernRichShell = "probing";
+    }
+
+    function commitRichFrameShellHeight(registration: RichFrameRegistration, height: number): void {
+      const sizing = registration.sizing;
+      const shell = getRichFrameShell(registration);
+      if (sizing === undefined || shell === null) return;
+      const currentHeight = clampRichFrameHeight(shell.getBoundingClientRect().height);
+      const targetHeight = clampRichFrameHeight(height);
+      shell.style.height = `${currentHeight}px`;
+      shell.dataset.tavernRichShell = "ready";
+      void shell.offsetHeight;
+      shell.style.height = `${targetHeight}px`;
+    }
+
+    function postRichFrameOverflowMode(registration: RichFrameRegistration, mode: "outer" | "inner"): void {
+      if (mode === "inner") registration.frame.removeAttribute("scrolling");
+      else registration.frame.setAttribute("scrolling", "no");
+      registration.frame.contentWindow?.postMessage({
+        source: "dsh-re3-rp-rich-host",
+        token: registration.token,
+        kind: "set-overflow-mode",
+        mode,
+      }, "*");
+    }
+
+    function settleRichFrameSizing(
+      registration: RichFrameRegistration,
+      height: number,
+      disposition: "intrinsic" | "viewport" | "inner-scroll" | "fallback",
+    ): void {
+      const sizing = registration.sizing;
+      if (sizing === undefined) return;
+      const measuredLayoutVersion = sizing.layoutVersion;
+      const pendingProbe = sizing.pendingProbe && (
+        sizing.pendingReason === "viewport"
+        || sizing.pendingLayoutVersion === undefined
+        || measuredLayoutVersion === undefined
+        || sizing.pendingLayoutVersion > measuredLayoutVersion
+      );
+      const pendingReason = sizing.pendingReason ?? "mutation";
+      const pendingLayoutVersion = sizing.pendingLayoutVersion;
+      sizing.phase = "settled";
+      sizing.expectedHeight = clampRichFrameHeight(height);
+      sizing.committedHeight = sizing.expectedHeight;
+      sizing.first = undefined;
+      sizing.verificationFirst = undefined;
+      sizing.layoutVersion = undefined;
+      sizing.pendingProbe = false;
+      sizing.pendingReason = undefined;
+      sizing.pendingLayoutVersion = undefined;
+      sizing.settled = true;
+      if (disposition !== "inner-scroll") {
+        sizing.fallbackLatched = false;
+        if (sizing.fallbackRetryTimer !== undefined) window.clearTimeout(sizing.fallbackRetryTimer);
+        sizing.fallbackRetryTimer = undefined;
+      }
+      sizing.cycleStartedAt = undefined;
+      sizing.restartAttempts = 0;
+      sizing.suppressResizeUntil = performance.now() + 250;
+      registration.frame.style.height = `${sizing.expectedHeight}px`;
+      commitRichFrameShellHeight(registration, sizing.expectedHeight);
+      registration.frame.style.removeProperty("visibility");
+      registration.frame.dataset.tavernRichSizing = disposition;
+      if (pendingProbe) scheduleRichFrameProbe(registration, pendingReason, pendingLayoutVersion);
+    }
+
+    function fallbackRichFrameSizing(registration: RichFrameRegistration): void {
+      const sizing = registration.sizing;
+      if (sizing === undefined) return;
+      sizing.pendingProbe = false;
+      sizing.fallbackLatched = true;
+      postRichFrameOverflowMode(registration, "inner");
+      const fallbackHeight = sizing.settled ? sizing.committedHeight : (sizing.first?.bodyHeight ?? sizing.baseHeight);
+      settleRichFrameSizing(registration, fallbackHeight, "inner-scroll");
+    }
+
+    function restartRichFrameProbe(registration: RichFrameRegistration): void {
+      const sizing = registration.sizing;
+      if (sizing === undefined) return;
+      const elapsed = performance.now() - (sizing.cycleStartedAt ?? performance.now());
+      if (sizing.restartAttempts >= 4 || elapsed >= 2_500) {
+        fallbackRichFrameSizing(registration);
+        return;
+      }
+      sizing.restartAttempts += 1;
+      sizing.phase = "idle";
+      scheduleRichFrameProbe(registration, "retry");
+    }
+
+    function restartRichFrameAfterLoad(registration: RichFrameRegistration): void {
+      const sizing = registration.sizing;
+      if (sizing === undefined) return;
+      if (sizing.timer !== undefined) window.clearTimeout(sizing.timer);
+      if (sizing.publishFrame !== undefined) cancelAnimationFrame(sizing.publishFrame);
+      if (sizing.measurementTimer !== undefined) window.clearTimeout(sizing.measurementTimer);
+      if (sizing.fallbackRetryTimer !== undefined) window.clearTimeout(sizing.fallbackRetryTimer);
+      sizing.timer = undefined;
+      sizing.publishFrame = undefined;
+      sizing.measurementTimer = undefined;
+      sizing.fallbackRetryTimer = undefined;
+      sizing.probeId += 1;
+      sizing.phase = "idle";
+      sizing.expectedHeight = sizing.committedHeight;
+      sizing.first = undefined;
+      sizing.verificationFirst = undefined;
+      sizing.layoutVersion = undefined;
+      sizing.viewportCoupled = false;
+      sizing.releasedScrollKeys = [];
+      sizing.releaseBasisKeys = [];
+      sizing.verificationAttempts = 0;
+      sizing.cycleStartedAt = undefined;
+      sizing.restartAttempts = 0;
+      sizing.pendingProbe = false;
+      sizing.pendingReason = undefined;
+      sizing.pendingLayoutVersion = undefined;
+      sizing.scheduledReason = undefined;
+      sizing.fallbackLatched = false;
+      sizing.suppressResizeUntil = 0;
+      registration.frame.style.visibility = "hidden";
+      scheduleRichFrameProbe(registration, "load");
+    }
+
+    function requestRichFrameMeasure(registration: RichFrameRegistration, phase: "first" | "second" | "verify" | "verify-second" | "refresh", height: number): void {
+      const sizing = registration.sizing;
+      if (sizing === undefined) return;
+      if (sizing.publishFrame !== undefined) cancelAnimationFrame(sizing.publishFrame);
+      if (sizing.measurementTimer !== undefined) window.clearTimeout(sizing.measurementTimer);
+      sizing.phase = phase;
+      sizing.expectedHeight = clampRichFrameHeight(height);
+      registration.frame.style.height = `${sizing.expectedHeight}px`;
+      sizing.publishFrame = requestAnimationFrame(() => {
+        sizing.publishFrame = undefined;
+        if (sizing.phase !== phase) return;
+        registration.frame.contentWindow?.postMessage({
+          source: "dsh-re3-rp-rich-host",
+          token: registration.token,
+          kind: "measure-layout",
+          probeId: sizing.probeId,
+          phase,
+          expectedViewportHeight: sizing.expectedHeight,
+        }, "*");
+        sizing.measurementTimer = window.setTimeout(() => {
+          if (sizing.phase !== phase) return;
+          sizing.measurementTimer = undefined;
+          fallbackRichFrameSizing(registration);
+        }, 1_500);
       });
     }
 
+    function beginRichFrameRefresh(registration: RichFrameRegistration): void {
+      const sizing = registration.sizing;
+      if (sizing === undefined || registration.frame.isConnected !== true) return;
+      if (sizing.timer !== undefined) window.clearTimeout(sizing.timer);
+      sizing.timer = undefined;
+      sizing.probeId += 1;
+      sizing.first = undefined;
+      sizing.verificationFirst = undefined;
+      sizing.layoutVersion = undefined;
+      sizing.pendingProbe = false;
+      sizing.pendingReason = undefined;
+      sizing.pendingLayoutVersion = undefined;
+      lockRichFrameShell(registration);
+      registration.frame.dataset.tavernRichSizing = "refreshing";
+      requestRichFrameMeasure(registration, "refresh", sizing.committedHeight);
+    }
+
+    function beginRichFrameProbe(registration: RichFrameRegistration, reason: string): void {
+      const sizing = registration.sizing;
+      if (sizing === undefined || registration.frame.isConnected !== true) return;
+      if (sizing.settled && reason !== "load" && reason !== "retry" && reason !== "viewport") {
+        beginRichFrameRefresh(registration);
+        return;
+      }
+      if (sizing.timer !== undefined) window.clearTimeout(sizing.timer);
+      sizing.timer = undefined;
+      if (sizing.cycleStartedAt === undefined) sizing.cycleStartedAt = performance.now();
+      sizing.probeId += 1;
+      sizing.first = undefined;
+      sizing.verificationFirst = undefined;
+      sizing.layoutVersion = undefined;
+      sizing.viewportCoupled = false;
+      sizing.releasedScrollKeys = [];
+      sizing.releaseBasisKeys = [];
+      sizing.verificationAttempts = 0;
+      sizing.pendingProbe = false;
+      sizing.pendingReason = undefined;
+      sizing.pendingLayoutVersion = undefined;
+      lockRichFrameShell(registration);
+      if (!sizing.settled) registration.frame.style.visibility = "hidden";
+      registration.frame.dataset.tavernRichSizing = "probing";
+      postRichFrameOverflowMode(registration, "outer");
+      const baseHeight = clampRichFrameHeight(window.visualViewport?.height ?? window.innerHeight);
+      sizing.baseHeight = baseHeight;
+      requestRichFrameMeasure(registration, "first", baseHeight);
+    }
+
+    function scheduleRichFrameProbe(registration: RichFrameRegistration, reason: string, layoutVersion?: number): void {
+      const sizing = registration.sizing;
+      if (sizing === undefined) return;
+      const suppressesFallbackFeedback = performance.now() < sizing.suppressResizeUntil
+        && (reason === "resize" || reason === "content");
+      if (sizing.fallbackLatched) {
+        if (suppressesFallbackFeedback) return;
+        if (reason === "viewport") {
+          sizing.fallbackLatched = false;
+          if (sizing.fallbackRetryTimer !== undefined) window.clearTimeout(sizing.fallbackRetryTimer);
+          sizing.fallbackRetryTimer = undefined;
+        } else {
+          if (reason === "resize") return;
+          if (sizing.fallbackRetryTimer !== undefined) window.clearTimeout(sizing.fallbackRetryTimer);
+          sizing.fallbackRetryTimer = window.setTimeout(() => {
+            sizing.fallbackRetryTimer = undefined;
+            sizing.fallbackLatched = false;
+            scheduleRichFrameProbe(registration, "retry");
+          }, 500);
+          return;
+        }
+      }
+      if (reason === "resize" && (sizing.phase !== "settled" || performance.now() < sizing.suppressResizeUntil)) return;
+      if (sizing.cycleStartedAt === undefined) {
+        sizing.cycleStartedAt = performance.now();
+        sizing.restartAttempts = 0;
+      }
+      if (sizing.phase === "first" || sizing.phase === "second" || sizing.phase === "verify" || sizing.phase === "verify-second" || sizing.phase === "refresh") {
+        sizing.pendingProbe = true;
+        sizing.pendingReason = sizing.pendingReason === "viewport" || reason !== "viewport" ? (sizing.pendingReason ?? reason) : "viewport";
+        if (Number.isSafeInteger(layoutVersion)) sizing.pendingLayoutVersion = Math.max(sizing.pendingLayoutVersion ?? -1, Number(layoutVersion));
+        return;
+      }
+      if (sizing.timer !== undefined) {
+        if (reason === "viewport") sizing.scheduledReason = "viewport";
+        return;
+      }
+      sizing.scheduledReason = reason;
+      sizing.timer = window.setTimeout(() => {
+        const scheduledReason = sizing.scheduledReason ?? reason;
+        sizing.scheduledReason = undefined;
+        beginRichFrameProbe(registration, scheduledReason);
+      }, reason === "load" ? 0 : 48);
+    }
+
+    function normalizeRichFrameSnapshot(value: any): RichFrameLayoutSnapshot | null {
+      if (value === null || typeof value !== "object" || !Array.isArray(value.scrollables)) return null;
+      const finite = (candidate: unknown): number | null => {
+        return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : null;
+      };
+      const viewportHeight = finite(value.viewportHeight);
+      const bodyHeight = finite(value.bodyHeight);
+      const contentBottom = finite(value.contentBottom);
+      const layoutVersion = typeof value.layoutVersion === "number" ? value.layoutVersion : Number.NaN;
+      if (viewportHeight === null || viewportHeight <= 0 || bodyHeight === null || bodyHeight < 0 || contentBottom === null || contentBottom < 0 || !Number.isSafeInteger(layoutVersion) || layoutVersion < 0) return null;
+      if (value.scrollables.length > 5_000) return null;
+      const scrollables: RichFrameScrollableMetrics[] = [];
+      for (let itemIndex = 0; itemIndex < value.scrollables.length; itemIndex += 1) {
+        const item = value.scrollables[itemIndex];
+        if (item === null || typeof item !== "object" || typeof item.key !== "string" || item.key.length > 256 || !Array.isArray(item.owners)) continue;
+        const top = finite(item.top);
+        const clientHeight = finite(item.clientHeight);
+        const scrollHeight = finite(item.scrollHeight);
+        if (top === null || clientHeight === null || clientHeight < 0 || scrollHeight === null || scrollHeight < 0) continue;
+        if (item.owners.length > 100) continue;
+        const owners: NonNullable<RichFrameScrollableMetrics["owners"]> = [];
+        let validOwners = true;
+        for (let ownerIndex = 0; ownerIndex < item.owners.length; ownerIndex += 1) {
+          const owner = item.owners[ownerIndex];
+          if (owner === null || typeof owner !== "object" || typeof owner.key !== "string" || owner.key.length > 256 || (owner.kind !== "fixed" && owner.kind !== "clip" && owner.kind !== "scroll")) {
+            validOwners = false;
+            break;
+          }
+          const ownerHeight = finite(owner.clientHeight);
+          if (ownerHeight === null || ownerHeight < 0) {
+            validOwners = false;
+            break;
+          }
+          owners.push({ key: owner.key, kind: owner.kind, clientHeight: ownerHeight });
+        }
+        if (!validOwners) continue;
+        scrollables.push({ key: item.key, visible: item.visible === true, top, clientHeight, scrollHeight, owners });
+      }
+      return { viewportHeight, bodyHeight, contentBottom, layoutVersion, scrollables };
+    }
+
+    function NativeRichFrame(props: { content: string; token: string; revisionId: string; variableState: Record<string, unknown>; frontendStorage: Record<string, string>; cardTitle: string; messageCount: number; register: (token: string, frame: HTMLIFrameElement | null, registeredFrame?: HTMLIFrameElement) => void; ready: (token: string, frame: HTMLIFrameElement) => void }): any {
+      const frameRef = React.useRef(null as HTMLIFrameElement | null);
+      // Authored content plus the immutable card revision identify the iframe
+      // document. Session state and message count remain live Bridge data, so
+      // ordinary projection refreshes do not navigate an existing realm.
+      const source = React.useMemo(
+        () => `data:text/html;charset=utf-8,${encodeURIComponent(nativeRichSrcDoc(props.content, props.token, props.variableState, props.frontendStorage, props.cardTitle, props.messageCount, props.revisionId))}`,
+        [props.content, props.token, props.cardTitle, props.revisionId],
+      );
+      const pushProjection = (): void => {
+        const currentMessageId = Number(props.token.split(":", 1)[0]) || -1;
+        frameRef.current?.contentWindow?.postMessage({
+          source: "dsh-re3-rp-rich-host",
+          token: props.token,
+          kind: "projection",
+          state: props.variableState,
+          storage: props.frontendStorage,
+          messageCount: props.messageCount,
+          currentMessageId,
+        }, "*");
+      };
+      React.useEffect(() => { pushProjection(); }, [props.variableState, props.frontendStorage, props.messageCount]);
+      const registerFrame = React.useCallback((frame: HTMLIFrameElement | null): void => {
+        const registeredFrame = frameRef.current ?? undefined;
+        frameRef.current = frame;
+        props.register(props.token, frame, registeredFrame);
+      }, [props.register, props.token]);
+      return h("div", { className: "tavern-native-rich-frame-shell", "data-tavern-rich-shell": "loading" },
+        h("iframe", {
+          className: "tavern-native-rich-frame",
+          title: "卡片生成的消息前端",
+          // A data document keeps a unique opaque origin while allow-same-origin
+          // restores the inline handlers and Web Storage semantics used by real
+          // Tavern card UIs. The card still cannot read the DSH parent document.
+          // Real Tavern setup UIs commonly gate their final submit behind
+          // confirm(). Keep the frame isolated from the Host while allowing that
+          // explicit player confirmation to unblock the narrow Bridge action.
+          sandbox: "allow-scripts allow-same-origin allow-modals",
+          scrolling: "no",
+          src: source,
+          referrerPolicy: "no-referrer",
+          "data-tavern-rich-token": props.token,
+          onLoad: (event: Event) => {
+            pushProjection();
+            const frame = event.currentTarget as HTMLIFrameElement;
+            const readyEpoch = frame.dataset.tavernRichReadyEpoch;
+            window.setTimeout(() => {
+              if (frame.isConnected && frame.dataset.tavernRichReadyEpoch === readyEpoch) props.ready(props.token, frame);
+            }, 120);
+          },
+          ref: registerFrame,
+        }));
+    }
+
     function companionSrcDoc(scripts: readonly CompanionScript[], token: string, frontendStorage: Record<string, string>, cardTitle: string): string {
-      const encodedSources = JSON.stringify(scripts.map((script) => ({ id: script.id, name: script.name, source: script.source })))
+      const encodedSources = JSON.stringify(scripts.map((script) => ({ id: script.id, name: script.name, source: adaptTavernHelperScriptSource(script.source) })))
         .replace(/</gu, "\\u003c").replace(/\u2028/gu, "\\u2028").replace(/\u2029/gu, "\\u2029");
       const runner = `<script>(async()=>{document.documentElement.dataset.dshCompanionRunner='started';const scripts=${encodedSources};for(const script of scripts){const url=URL.createObjectURL(new Blob([script.source],{type:'text/javascript'}));try{await import(url)}catch(error){console.error('[DSH Re3 RPHelper] '+script.name,error);const diagnostic=document.createElement('pre');diagnostic.hidden=true;diagnostic.dataset.dshRuntimeError='';diagnostic.textContent='[DSH Re3 RPHelper] '+script.name+': '+(error?.stack||error);document.body.appendChild(diagnostic)}finally{URL.revokeObjectURL(url)}}document.documentElement.dataset.dshCompanionRunner='complete'})();<\/script>`;
       return nativeRichSrcDoc(runner, token, {}, frontendStorage, cardTitle, 0);
     }
 
-    function NativeCompanionRuntime(props: { sessionId: string; revisionId: string; scripts: readonly CompanionScript[]; variableState: Record<string, unknown>; frontendStorage: Record<string, string>; cardTitle: string; messages: readonly ProjectedMessage[]; register: (token: string, frame: HTMLIFrameElement | null) => void }): any {
+    function NativeCompanionRuntime(props: { sessionId: string; revisionId: string; scripts: readonly CompanionScript[]; variableState: Record<string, unknown>; frontendStorage: Record<string, string>; cardTitle: string; messages: readonly ProjectedMessage[]; register: (token: string, frame: HTMLIFrameElement | null, registeredFrame?: HTMLIFrameElement) => void }): any {
       const token = `companion:${props.sessionId}:${props.revisionId}`;
       const frameRef = React.useRef(null as HTMLIFrameElement | null);
       // Real TavernHelper bundles regularly exceed one megabyte. Percent-
       // encoding those bundles into a data URL crosses browser URL limits and
       // fails as an empty frame without a useful error. srcdoc carries the same
       // isolated document without a URL-size ceiling.
-      const sourceDocument = companionSrcDoc(props.scripts, token, props.frontendStorage, props.cardTitle);
+      const scriptsIdentity = props.scripts.map((script) => `${script.id}\u0000${script.name}\u0000${script.source}`).join("\u0001");
+      const sourceDocument = React.useMemo(
+        () => companionSrcDoc(props.scripts, token, props.frontendStorage, props.cardTitle),
+        [scriptsIdentity, token, props.cardTitle],
+      );
       const pushProjection = (): void => {
         const currentMessageId = props.messages.filter((message) => message.role === "assistant").at(-1)?.seq ?? -1;
-        frameRef.current?.contentWindow?.postMessage({ source: "dsh-re3-rp-rich-host", token, kind: "projection", state: props.variableState, messageCount: props.messages.length, currentMessageId }, "*");
+        frameRef.current?.contentWindow?.postMessage({ source: "dsh-re3-rp-rich-host", token, kind: "projection", state: props.variableState, storage: props.frontendStorage, messageCount: props.messages.length, currentMessageId }, "*");
       };
-      React.useEffect(() => { pushProjection(); }, [props.variableState, props.messages.length]);
+      React.useEffect(() => { pushProjection(); }, [props.variableState, props.frontendStorage, props.messages.length]);
+      const registerFrame = React.useCallback((frame: HTMLIFrameElement | null): void => {
+        const registeredFrame = frameRef.current ?? undefined;
+        frameRef.current = frame;
+        props.register(token, frame, registeredFrame);
+      }, [props.register, token]);
       return h("iframe", {
         className: "tavern-native-companion-frame",
         title: "卡片 TavernHelper 伴随前端",
@@ -1996,7 +2472,7 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
         referrerPolicy: "no-referrer",
         "data-tavern-companion-runtime": props.revisionId,
         onLoad: pushProjection,
-        ref: (frame: HTMLIFrameElement | null) => { frameRef.current = frame; props.register(token, frame); },
+        ref: registerFrame,
       });
     }
 
@@ -2011,11 +2487,11 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
       });
     }
 
-    function NativeRichMessage(props: { message: ProjectedMessage; frontend?: HostedFrontend; variableState: Record<string, unknown>; frontendStorage: Record<string, string>; cardTitle: string; messageCount: number; register: (token: string, frame: HTMLIFrameElement | null) => void }): any {
+    function NativeRichMessage(props: { message: ProjectedMessage; revisionId: string; frontend?: HostedFrontend; variableState: Record<string, unknown>; frontendStorage: Record<string, string>; cardTitle: string; messageCount: number; register: (token: string, frame: HTMLIFrameElement | null, registeredFrame?: HTMLIFrameElement) => void; ready: (token: string, frame: HTMLIFrameElement) => void }): any {
       const blocks = splitRichMessage(props.message.text);
       const content = blocks.map((block, index) => block.kind === "prose"
         ? h(MarkdownText, { text: block.content, key: `prose:${index}` })
-        : h(NativeRichFrame, { content: block.content, token: `${props.message.seq}:${index}`, variableState: props.variableState, frontendStorage: props.frontendStorage, cardTitle: props.cardTitle, messageCount: props.messageCount, register: props.register, key: `html:${index}` }));
+        : h(NativeRichFrame, { content: block.content, token: `${props.message.seq}:${index}`, revisionId: props.revisionId, variableState: props.variableState, frontendStorage: props.frontendStorage, cardTitle: props.cardTitle, messageCount: props.messageCount, register: props.register, ready: props.ready, key: `html:${props.revisionId}:${index}` }));
       if (props.frontend !== undefined) content.push(h(NativeHostedFrontend, { frontend: props.frontend, key: "hosted-frontend" }));
       return h("div", { className: "tavern-native-message" }, ...content);
     }
@@ -2027,19 +2503,53 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
       const [, refreshPermission] = React.useReducer((value: number) => value + 1, 0);
       const anchorRef = React.useRef(null as HTMLSpanElement | null);
       const mountsRef = React.useRef(new Map<HTMLElement, NativeRichMount>());
-      const framesRef = React.useRef(new Map<string, { frame: HTMLIFrameElement; sessionId: string; revisionId: string }>());
+      const framesRef = React.useRef(new Map<string, RichFrameRegistration>());
+      const retiredFramesRef = React.useRef(new Map<Window, { token: string; sessionId: string; revisionId: string; expiresAt: number }>());
+      const projectionRef = React.useRef(projection);
+      projectionRef.current = projection;
+      const activeRevisionIdRef = React.useRef(projection?.revisionId ?? "");
+      activeRevisionIdRef.current = projection?.revisionId ?? "";
+      const scheduleScanRef = React.useRef(undefined as (() => void) | undefined);
       const [projectionRevision, refreshProjection] = React.useReducer((value: number) => value + 1, 0);
-      const activeRevisionId = projection?.revisionId ?? "";
-      const register = React.useCallback((token: string, frame: HTMLIFrameElement | null): void => {
-        if (frame === null) framesRef.current.delete(token);
-        else framesRef.current.set(token, { frame, sessionId, revisionId: activeRevisionId });
-      }, [sessionId, activeRevisionId]);
+      const register = React.useCallback((token: string, frame: HTMLIFrameElement | null, registeredFrame?: HTMLIFrameElement): void => {
+        const previous = framesRef.current.get(token);
+        if (frame === null) {
+          if (registeredFrame === undefined || previous?.frame !== registeredFrame) return;
+          const source = registeredFrame.contentWindow;
+          if (source !== null) {
+            const retired = { token, sessionId: previous.sessionId, revisionId: previous.revisionId, expiresAt: performance.now() + 1_000 };
+            retiredFramesRef.current.set(source, retired);
+            window.setTimeout(() => {
+              if (retiredFramesRef.current.get(source) === retired) retiredFramesRef.current.delete(source);
+            }, 1_000);
+          }
+          disposeRichFrameSizing(previous);
+          framesRef.current.delete(token);
+          return;
+        }
+        if (previous?.frame === frame) {
+          previous.sessionId = sessionId;
+          return;
+        }
+        disposeRichFrameSizing(previous);
+        framesRef.current.set(token, {
+          token,
+          frame,
+          sessionId,
+          revisionId: activeRevisionIdRef.current,
+          sizing: token.startsWith("companion:") ? undefined : createRichFrameSizingState(),
+        });
+      }, [sessionId]);
       const sessionRevision = props.useSession((snapshot: any) => `${snapshot.nodes.length}:${snapshot.running}:${snapshot.openState}`);
 
       React.useEffect(() => {
         const controller = new AbortController();
         void fetch(`/dsh-re3-rp/conversation-projection?sessionId=${encodeURIComponent(sessionId)}&optional=1`, { cache: "no-store", signal: controller.signal })
-          .then(async (response) => response.status === 204 ? null : response.ok ? await response.json() as ConversationProjection : null)
+          .then(async (response) => {
+            if (response.status === 204) return null;
+            if (!response.ok) throw new Error(`conversation projection failed: ${response.status}`);
+            return await response.json() as ConversationProjection;
+          })
           .then((value) => {
             if (controller.signal.aborted) return;
             setProjectionState({ sessionId, value });
@@ -2048,8 +2558,9 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
           })
           .catch(() => {
             if (controller.signal.aborted) return;
-            setProjectionState({ sessionId, value: null });
-            clearActiveTavernSession(sessionId);
+            // A transient transport failure is not authoritative deletion.
+            // Keep the last-known-good projection and its live iframe realms;
+            // only an explicit 204 tears the adapter down.
           });
         return () => controller.abort();
       }, [sessionId, sessionRevision, projectionRevision]);
@@ -2068,11 +2579,141 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
         return () => window.removeEventListener("dsh-re3-rp:companion-permission", refresh);
       }, []);
 
+      React.useEffect(() => {
+        let viewportFrame: number | undefined;
+        const publishViewport = (): void => {
+          viewportFrame = undefined;
+          for (const registration of framesRef.current.values()) scheduleRichFrameProbe(registration, "viewport");
+        };
+        const scheduleViewport = (): void => {
+          if (viewportFrame === undefined) viewportFrame = requestAnimationFrame(publishViewport);
+        };
+        window.addEventListener("resize", scheduleViewport);
+        window.visualViewport?.addEventListener("resize", scheduleViewport);
+        scheduleViewport();
+        return () => {
+          window.removeEventListener("resize", scheduleViewport);
+          window.visualViewport?.removeEventListener("resize", scheduleViewport);
+          if (viewportFrame !== undefined) cancelAnimationFrame(viewportFrame);
+        };
+      }, []);
+
       React.useLayoutEffect(() => {
         const scroll = anchorRef.current?.closest('[data-conversation-scroll]') as HTMLElement | null;
-        if (scroll === null || projection === undefined) return;
+        if (scroll === null) return;
         const mounts = mountsRef.current;
         const frames = framesRef.current;
+        let viewportAnchor: { element: HTMLElement; offset: number } | undefined;
+        let viewportAnchorFrame: number | undefined;
+        let viewportAnchorCaptureFrame: number | undefined;
+        let viewportAnchorDeadline = 0;
+        let viewportAnchorSuppressedUntil = 0;
+        let restoringViewportAnchor = false;
+        const captureViewportAnchor = (): void => {
+          const scrollRect = scroll.getBoundingClientRect();
+          if (scrollRect.width <= 0 || scrollRect.height <= 0) return;
+          const visibleShell = Array.from(scroll.querySelectorAll<HTMLElement>(".tavern-native-rich-frame-shell"))
+            .find((candidate) => {
+              const rect = candidate.getBoundingClientRect();
+              return rect.bottom > scrollRect.top + 1 && rect.top < scrollRect.bottom - 1;
+            });
+          const point = visibleShell ?? document.elementFromPoint(
+            Math.min(scrollRect.right - 1, scrollRect.left + Math.min(48, scrollRect.width / 2)),
+            Math.min(scrollRect.bottom - 1, scrollRect.top + Math.min(48, scrollRect.height / 2)),
+          );
+          const element = point instanceof HTMLElement && point !== scroll && scroll.contains(point) ? point : undefined;
+          if (element === undefined) return;
+          viewportAnchor = { element, offset: element.getBoundingClientRect().top - scrollRect.top };
+        };
+        const scheduleViewportAnchorCapture = (): void => {
+          if (restoringViewportAnchor || performance.now() < viewportAnchorDeadline || viewportAnchorCaptureFrame !== undefined) return;
+          viewportAnchorCaptureFrame = requestAnimationFrame(() => {
+            viewportAnchorCaptureFrame = undefined;
+            captureViewportAnchor();
+          });
+        };
+        const scheduleUserViewportAnchorCapture = (): void => {
+          if (restoringViewportAnchor || viewportAnchorCaptureFrame !== undefined) return;
+          viewportAnchorCaptureFrame = requestAnimationFrame(() => {
+            viewportAnchorCaptureFrame = undefined;
+            captureViewportAnchor();
+          });
+        };
+        const restoreViewportAnchor = (): void => {
+          const anchor = viewportAnchor;
+          if (anchor === undefined || !anchor.element.isConnected || !scroll.contains(anchor.element)) {
+            captureViewportAnchor();
+            return;
+          }
+          const delta = anchor.element.getBoundingClientRect().top - scroll.getBoundingClientRect().top - anchor.offset;
+          if (!Number.isFinite(delta) || Math.abs(delta) <= 0.5) return;
+          restoringViewportAnchor = true;
+          const previousScrollBehavior = scroll.style.scrollBehavior;
+          scroll.style.scrollBehavior = "auto";
+          scroll.scrollTop += delta;
+          scroll.style.scrollBehavior = previousScrollBehavior;
+          restoringViewportAnchor = false;
+        };
+        const runViewportAnchorStabilization = (): void => {
+          restoreViewportAnchor();
+          if (performance.now() < viewportAnchorDeadline) {
+            viewportAnchorFrame = requestAnimationFrame(runViewportAnchorStabilization);
+            return;
+          }
+          viewportAnchorFrame = undefined;
+          captureViewportAnchor();
+        };
+        const stabilizeViewportAnchor = (): void => {
+          if (performance.now() < viewportAnchorSuppressedUntil) return;
+          if (viewportAnchor === undefined) captureViewportAnchor();
+          viewportAnchorDeadline = performance.now() + 450;
+          if (viewportAnchorFrame === undefined) viewportAnchorFrame = requestAnimationFrame(runViewportAnchorStabilization);
+        };
+        const cancelViewportAnchorForUserInput = (): void => {
+          viewportAnchorSuppressedUntil = performance.now() + 750;
+          viewportAnchorDeadline = 0;
+          viewportAnchor = undefined;
+          if (viewportAnchorFrame !== undefined) cancelAnimationFrame(viewportAnchorFrame);
+          viewportAnchorFrame = undefined;
+        };
+        const handleConversationScroll = (): void => {
+          if (restoringViewportAnchor) return;
+          if (performance.now() < viewportAnchorSuppressedUntil) scheduleUserViewportAnchorCapture();
+          else if (performance.now() >= viewportAnchorDeadline) scheduleViewportAnchorCapture();
+        };
+        const handleViewportNavigationKey = (event: KeyboardEvent): void => {
+          if (["ArrowDown", "ArrowUp", "End", "Home", "PageDown", "PageUp", " "].includes(event.key)) cancelViewportAnchorForUserInput();
+        };
+        const viewportResizeObserver = new ResizeObserver(stabilizeViewportAnchor);
+        viewportResizeObserver.observe(scroll);
+        scroll.addEventListener("scroll", handleConversationScroll, { passive: true });
+        scroll.addEventListener("wheel", cancelViewportAnchorForUserInput, { passive: true });
+        scroll.addEventListener("touchstart", cancelViewportAnchorForUserInput, { passive: true });
+        scroll.addEventListener("pointerdown", cancelViewportAnchorForUserInput, { passive: true });
+        window.addEventListener("keydown", handleViewportNavigationKey);
+        window.addEventListener("resize", stabilizeViewportAnchor);
+        window.visualViewport?.addEventListener("resize", stabilizeViewportAnchor);
+        const ready = (token: string, frame: HTMLIFrameElement): void => {
+          const registration = frames.get(token);
+          if (registration === undefined || registration.frame !== frame) return;
+          const currentProjection = projectionRef.current;
+          if (currentProjection !== undefined && currentProjection !== null && registration.revisionId === currentProjection.revisionId) {
+            const latestAssistantSeq = currentProjection.messages.filter((message: ProjectedMessage) => message.role === "assistant").at(-1)?.seq ?? -1;
+            const ownMessageId = Number(token.split(":", 1)[0]);
+            frame.contentWindow?.postMessage({
+              source: "dsh-re3-rp-rich-host",
+              token,
+              kind: "projection",
+              state: currentProjection.variableState ?? {},
+              storage: currentProjection.frontendStorage ?? {},
+              messageCount: currentProjection.messages.length,
+              currentMessageId: Number.isSafeInteger(ownMessageId) ? ownMessageId : latestAssistantSeq,
+            }, "*");
+          }
+          postRichFrameReady(frame, token);
+          restartRichFrameAfterLoad(registration);
+          scheduleViewportAnchorCapture();
+        };
         const companionGlobals = new Map<string, Map<string, unknown>>();
         const hiddenThoughts = new Map<HTMLElement, string>();
         let scanFrame: number | undefined;
@@ -2091,8 +2732,11 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
           hiddenThoughts.delete(thought);
         };
         const scan = (): void => {
-          if (projection === null) {
+          const currentProjection = projectionRef.current;
+          if (currentProjection === undefined) return;
+          if (currentProjection === null) {
             for (const mount of [...mounts.values()]) restore(mount);
+            for (const thought of [...hiddenThoughts.keys()]) restoreThought(thought);
             return;
           }
           const flowItems = Array.from(scroll.querySelectorAll<HTMLElement>('[data-chat-flow-kind="user"], [data-chat-flow-kind="assistant-step"]'));
@@ -2106,39 +2750,57 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
             }
           }
           for (const thought of [...hiddenThoughts.keys()]) if (!liveThoughts.has(thought) || !thought.isConnected) restoreThought(thought);
+          const projectedAssistantSeqs = new Set(currentProjection.messages.filter((message: ProjectedMessage) => message.role === "assistant").map((message: ProjectedMessage) => message.seq));
+          for (const mount of [...mounts.values()]) {
+            if (!mount.item.isConnected || !scroll.contains(mount.item) || !projectedAssistantSeqs.has(mount.messageSeq)) restore(mount);
+          }
           const aligned = alignProjectedRoles(
             flowItems.map((item) => item.dataset.chatFlowKind === "user" ? "user" : "assistant"),
-            projection.messages.map((message: ProjectedMessage) => message.role),
+            currentProjection.messages.map((message: ProjectedMessage) => message.role),
           );
           if (aligned === null) return;
           const liveItems = new Set<HTMLElement>();
-          const hostedMessageSeq = projection.frontend?.entryUrl === undefined ? undefined : projection.messages.find((candidate: ProjectedMessage) => candidate.role === "assistant")?.seq;
+          const hostedMessageSeq = currentProjection.frontend?.entryUrl === undefined ? undefined : currentProjection.messages.find((candidate: ProjectedMessage) => candidate.role === "assistant")?.seq;
           flowItems.forEach((item, index) => {
             if (item.dataset.chatFlowKind !== "assistant-step") return;
             const projectedIndex = aligned[index];
-            const message = projectedIndex === null ? undefined : projection.messages[projectedIndex];
-            const hostedFrontend = message?.seq === hostedMessageSeq ? projection.frontend ?? undefined : undefined;
+            const message = projectedIndex === null ? undefined : currentProjection.messages[projectedIndex];
+            const hostedFrontend = message?.seq === hostedMessageSeq ? currentProjection.frontend ?? undefined : undefined;
             if (message === undefined || (!splitRichMessage(message.text).some((block) => block.kind === "html") && hostedFrontend === undefined && message.rawText === undefined)) return;
-            const original = item.firstElementChild as HTMLElement | null;
-            if (original === null) return;
-            liveItems.add(item);
-            const signature = `${message.seq}:${message.text}:${hostedFrontend?.entryUrl ?? ""}`;
+            const signature = `${currentProjection.revisionId}:${message.seq}:${message.text}:${hostedFrontend?.entryUrl ?? ""}`;
             let mount = mounts.get(item);
+            const original = Array.from(item.children).find((child) => child !== mount?.display) as HTMLElement | undefined;
+            if (original === undefined) {
+              if (mount !== undefined) liveItems.add(item);
+              return;
+            }
+            liveItems.add(item);
             if (mount === undefined) {
               const display = document.createElement("div");
               display.className = "tavern-native-rich-display";
               item.insertBefore(display, original.nextSibling);
-              mount = { item, original, display, root: ReactDOM.createRoot(display), signature: "" };
+              mount = { item, original, display, root: ReactDOM.createRoot(display), signature: "", messageSeq: message.seq };
               mounts.set(item, mount);
               item.dataset.tavernRichMessage = "true";
+            } else {
+              if (mount.display.parentElement !== item) item.insertBefore(mount.display, original.nextSibling);
+              if (mount.original !== original) {
+                mount.original.style.removeProperty("display");
+                mount.original = original;
+              }
             }
-            if (mount.signature === signature) return;
+            if (mount.signature === signature) {
+              original.style.display = "none";
+              return;
+            }
             mount.signature = signature;
+            mount.messageSeq = message.seq;
             original.style.removeProperty("display");
-            mount.root.render(h(NativeRichMessage, { message, frontend: hostedFrontend, variableState: projection.variableState ?? {}, frontendStorage: projection.frontendStorage ?? {}, cardTitle: projection.title, messageCount: projection.messages.length, register }));
+            mount.root.render(h(NativeRichMessage, { message, revisionId: currentProjection.revisionId, frontend: hostedFrontend, variableState: currentProjection.variableState ?? {}, frontendStorage: currentProjection.frontendStorage ?? {}, cardTitle: currentProjection.title, messageCount: currentProjection.messages.length, register, ready }));
             requestAnimationFrame(() => { if (mounts.get(item) === mount) original.style.display = "none"; });
           });
           for (const mount of [...mounts.values()]) if (!liveItems.has(mount.item) || !mount.item.isConnected) restore(mount);
+          scheduleViewportAnchorCapture();
         };
         const schedule = (): void => {
           if (scanFrame !== undefined) return;
@@ -2148,10 +2810,49 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
           const message = event.data as any;
           if (message?.source !== "dsh-re3-rp-rich-frame" || typeof message.token !== "string") return;
           const registration = frames.get(message.token);
-          if (registration === undefined || registration.sessionId !== sessionId || registration.revisionId !== activeRevisionId || event.source !== registration.frame.contentWindow) return;
+          if (registration === undefined || registration.sessionId !== sessionId || registration.revisionId !== activeRevisionIdRef.current || event.source !== registration.frame.contentWindow) {
+            const retired = event.source === null ? undefined : retiredFramesRef.current.get(event.source as Window);
+            if (retired === undefined
+              || retired.token !== message.token
+              || retired.sessionId !== sessionId
+              || retired.revisionId !== activeRevisionIdRef.current
+              || retired.expiresAt < performance.now()
+              || message.kind !== "request"
+              || message.action !== "replaceCardStorage") return;
+            void fetch("/dsh-re3-rp/bridge", {
+              method: "POST",
+              headers: { "content-type": "application/json; charset=utf-8" },
+              body: JSON.stringify({ sessionId, method: message.action, payload: message.payload ?? {} }),
+            }).then((response) => {
+              if (response.ok) window.dispatchEvent(new CustomEvent("dsh-re3-rp:projection-changed", { detail: { sessionId } }));
+            }).catch(() => {});
+            return;
+          }
           const frame = registration.frame;
           if (message.kind === "runtime-error" && typeof message.message === "string") {
             recordRuntimeDiagnostic(sessionId, message.token, message.message);
+            return;
+          }
+          if (message.kind === "frame-ready") {
+            if (registration.sizing === undefined || typeof message.epoch !== "string" || message.epoch.length === 0 || message.epoch.length > 256 || registration.documentEpoch === message.epoch) return;
+            registration.documentEpoch = message.epoch;
+            registration.frame.dataset.tavernRichReadyEpoch = message.epoch;
+            ready(message.token, registration.frame);
+            const snapshot = normalizeRichFrameSnapshot(message.snapshot);
+            const receiptHeight = typeof message.height === "number" && Number.isFinite(message.height) ? clampRichFrameHeight(Number(message.height)) : undefined;
+            if (snapshot !== null && receiptHeight === clampRichFrameHeight(snapshot.contentBottom)) {
+              const sizing = registration.sizing;
+              if (sizing.timer !== undefined) window.clearTimeout(sizing.timer);
+              if (sizing.publishFrame !== undefined) cancelAnimationFrame(sizing.publishFrame);
+              if (sizing.measurementTimer !== undefined) window.clearTimeout(sizing.measurementTimer);
+              sizing.timer = undefined;
+              sizing.publishFrame = undefined;
+              sizing.measurementTimer = undefined;
+              sizing.layoutVersion = snapshot.layoutVersion;
+              postRichFrameOverflowMode(registration, "outer");
+              settleRichFrameSizing(registration, resolveRichFrameLayoutHeight(snapshot, false), "intrinsic");
+              scheduleRichFrameProbe(registration, "retry");
+            }
             return;
           }
           if (message.kind === "global-registered" && message.token.startsWith("companion:") && typeof message.name === "string") {
@@ -2162,14 +2863,14 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
             }
             globals.set(message.name, message.value);
             for (const [requesterToken, requester] of frames.entries()) {
-              if (requesterToken.startsWith("companion:") || requester.sessionId !== sessionId || requester.revisionId !== activeRevisionId) continue;
+              if (requesterToken.startsWith("companion:") || requester.sessionId !== sessionId || requester.revisionId !== activeRevisionIdRef.current) continue;
               requester.frame.contentWindow?.postMessage({ source: "dsh-re3-rp-rich-host", token: requesterToken, kind: "global-published", name: message.name, value: message.value }, "*");
             }
             return;
           }
           if (message.kind === "global-value" && message.token.startsWith("companion:") && typeof message.requesterToken === "string") {
             const requester = frames.get(message.requesterToken);
-            if (requester === undefined || requester.sessionId !== sessionId || requester.revisionId !== activeRevisionId) return;
+            if (requester === undefined || requester.sessionId !== sessionId || requester.revisionId !== activeRevisionIdRef.current) return;
             requester.frame.contentWindow?.postMessage({ source: "dsh-re3-rp-rich-host", token: message.requesterToken, kind: "response", id: message.id, ok: true, result: { found: message.found === true, value: message.value } }, "*");
             return;
           }
@@ -2188,14 +2889,94 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
             }
             return;
           }
-          if (message.kind === "resize") {
-            // The token/source checks above make this a Host-owned resize
-            // receipt. Match TavernHelper's auto-height contract so the outer
-            // DSH conversation, rather than a clipped inner pane, owns scroll.
-            frame.style.height = `${clampRichFrameHeight(Number(message.height))}px`;
+          if (message.kind === "layout-invalidated") {
+            const layoutVersion = Number.isSafeInteger(message.layoutVersion) ? Number(message.layoutVersion) : undefined;
+            if (message.reason === "resize") stabilizeViewportAnchor();
+            const sizing = registration.sizing;
+            const snapshot = normalizeRichFrameSnapshot(message.snapshot);
+            const receiptHeight = typeof message.height === "number" && Number.isFinite(message.height) ? clampRichFrameHeight(Number(message.height)) : undefined;
+            if (sizing?.phase === "settled" && snapshot !== null && receiptHeight === clampRichFrameHeight(snapshot.contentBottom)) {
+              sizing.layoutVersion = snapshot.layoutVersion;
+              postRichFrameOverflowMode(registration, "outer");
+              settleRichFrameSizing(registration, resolveRichFrameLayoutHeight(snapshot, sizing.viewportCoupled, sizing.releasedScrollKeys), sizing.viewportCoupled ? "viewport" : "intrinsic");
+              return;
+            }
+            scheduleRichFrameProbe(registration, typeof message.reason === "string" ? message.reason : "mutation", layoutVersion);
             return;
           }
-          if (message.kind !== "request" || typeof message.id !== "number") return;
+          if (message.kind === "resize") {
+            const sizing = registration.sizing;
+            if (sizing === undefined || !Number.isSafeInteger(message.probeId) || message.probeId !== sizing.probeId || message.phase !== sizing.phase) return;
+            const snapshot = normalizeRichFrameSnapshot(message.snapshot);
+            if (snapshot === null || Math.abs(snapshot.viewportHeight - sizing.expectedHeight) > 2) return;
+            if (typeof message.height !== "number" || !Number.isFinite(message.height)) return;
+            const receiptHeight = clampRichFrameHeight(Number(message.height));
+            if (receiptHeight !== clampRichFrameHeight(snapshot.contentBottom)) return;
+            if (sizing.measurementTimer !== undefined) window.clearTimeout(sizing.measurementTimer);
+            sizing.measurementTimer = undefined;
+            if (sizing.phase === "refresh") {
+              sizing.layoutVersion = snapshot.layoutVersion;
+              const height = resolveRichFrameLayoutHeight(snapshot, sizing.viewportCoupled, sizing.releasedScrollKeys);
+              settleRichFrameSizing(registration, height, sizing.viewportCoupled ? "viewport" : "intrinsic");
+              return;
+            }
+            if (sizing.phase === "first") {
+              sizing.first = snapshot;
+              requestRichFrameMeasure(registration, "second", sizing.expectedHeight + 160);
+              return;
+            }
+            const first = sizing.first;
+            if (first === undefined) return;
+            if (sizing.phase === "second") {
+              if (first.layoutVersion !== snapshot.layoutVersion) {
+                restartRichFrameProbe(registration);
+                return;
+              }
+              sizing.viewportCoupled = isRichFrameViewportCoupled(first, snapshot);
+              sizing.releasedScrollKeys = findRichFrameViewportScrollKeys(first, snapshot);
+              sizing.releaseBasisKeys = [...sizing.releasedScrollKeys];
+              sizing.layoutVersion = snapshot.layoutVersion;
+              sizing.verificationAttempts = 0;
+              requestRichFrameMeasure(registration, "verify", resolveRichFrameProbeHeight(first, snapshot));
+              return;
+            }
+            if (sizing.phase === "verify") {
+              if (sizing.layoutVersion !== snapshot.layoutVersion) {
+                restartRichFrameProbe(registration);
+                return;
+              }
+              sizing.verificationFirst = snapshot;
+              requestRichFrameMeasure(registration, "verify-second", sizing.expectedHeight + 160);
+              return;
+            }
+            const verificationFirst = sizing.verificationFirst;
+            if (verificationFirst === undefined || verificationFirst.layoutVersion !== snapshot.layoutVersion) {
+              restartRichFrameProbe(registration);
+              return;
+            }
+            sizing.viewportCoupled = isRichFrameViewportCoupled(verificationFirst, snapshot);
+            sizing.releasedScrollKeys = findRichFrameViewportScrollKeys(verificationFirst, snapshot);
+            sizing.layoutVersion = snapshot.layoutVersion;
+            const releaseBasisStable = sizing.releaseBasisKeys.length === 0
+              || (sizing.viewportCoupled && areRichFrameScrollKeysStable(sizing.releaseBasisKeys, verificationFirst, snapshot));
+            const height = releaseBasisStable
+              ? resolveRichFrameProbeHeight(verificationFirst, snapshot)
+              : sizing.baseHeight;
+            if (Math.abs(height - verificationFirst.viewportHeight) <= 2) {
+              postRichFrameOverflowMode(registration, "outer");
+              settleRichFrameSizing(registration, height, sizing.viewportCoupled ? "viewport" : "intrinsic");
+              return;
+            }
+            if (sizing.verificationAttempts < 4) {
+              sizing.verificationAttempts += 1;
+              sizing.verificationFirst = undefined;
+              requestRichFrameMeasure(registration, "verify", height);
+              return;
+            }
+            fallbackRichFrameSizing(registration);
+            return;
+          }
+          if (message.kind !== "request" || (typeof message.id !== "number" && typeof message.id !== "string")) return;
           if (message.action === "setDraft") {
             const composer = document.querySelector<HTMLTextAreaElement>("textarea[data-phase]");
             if (composer === null || typeof message.payload?.text !== "string") {
@@ -2211,7 +2992,7 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
             return;
           }
           if (message.action === "getCompanionGlobal" && typeof message.payload?.name === "string") {
-            const companionEntry = [...frames.entries()].find(([candidateToken, candidate]) => candidateToken.startsWith(`companion:${sessionId}:`) && candidate.revisionId === activeRevisionId);
+            const companionEntry = [...frames.entries()].find(([candidateToken, candidate]) => candidateToken.startsWith(`companion:${sessionId}:`) && candidate.revisionId === activeRevisionIdRef.current);
             if (companionEntry === undefined) {
               frame.contentWindow?.postMessage({ source: "dsh-re3-rp-rich-host", token: message.token, kind: "response", id: message.id, ok: false, error: { code: "bridge_unavailable", message: "卡内常驻脚本尚未就绪" } }, "*");
               return;
@@ -2231,7 +3012,7 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
               const body = await response.json().catch(() => ({}));
               if (!response.ok || body.ok !== true) throw Object.assign(new Error(body?.error?.message ?? "Bridge unavailable"), { code: body?.error?.code ?? "bridge_unavailable" });
               if (message.action === "reportCompatibilityCall") void loadCapabilitySnapshot({ sessionId });
-              if (message.action === "selectOpening") window.dispatchEvent(new CustomEvent("dsh-re3-rp:projection-changed", { detail: { sessionId } }));
+              if (message.action === "selectOpening" || message.action === "replaceCardStorage") window.dispatchEvent(new CustomEvent("dsh-re3-rp:projection-changed", { detail: { sessionId } }));
               frame.contentWindow?.postMessage({ source: "dsh-re3-rp-rich-host", token: message.token, kind: "response", id: message.id, ok: true, result: body.result }, "*");
             })
             .catch((error) => frame.contentWindow?.postMessage({ source: "dsh-re3-rp-rich-host", token: message.token, kind: "response", id: message.id, ok: false, error: { code: error?.code ?? "bridge_unavailable", message: error?.message ?? "Bridge unavailable" } }, "*"));
@@ -2239,16 +3020,53 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
         window.addEventListener("message", onMessage);
         const observer = new MutationObserver(schedule);
         observer.observe(scroll, { childList: true, subtree: true });
+        scheduleScanRef.current = schedule;
         scan();
+        scheduleViewportAnchorCapture();
         return () => {
+          if (scheduleScanRef.current === schedule) scheduleScanRef.current = undefined;
           observer.disconnect();
+          viewportResizeObserver.disconnect();
+          scroll.removeEventListener("scroll", handleConversationScroll);
+          scroll.removeEventListener("wheel", cancelViewportAnchorForUserInput);
+          scroll.removeEventListener("touchstart", cancelViewportAnchorForUserInput);
+          scroll.removeEventListener("pointerdown", cancelViewportAnchorForUserInput);
+          window.removeEventListener("keydown", handleViewportNavigationKey);
+          window.removeEventListener("resize", stabilizeViewportAnchor);
+          window.visualViewport?.removeEventListener("resize", stabilizeViewportAnchor);
           window.removeEventListener("message", onMessage);
           if (scanFrame !== undefined) cancelAnimationFrame(scanFrame);
+          if (viewportAnchorFrame !== undefined) cancelAnimationFrame(viewportAnchorFrame);
+          if (viewportAnchorCaptureFrame !== undefined) cancelAnimationFrame(viewportAnchorCaptureFrame);
           for (const mount of [...mounts.values()]) restore(mount);
           for (const thought of [...hiddenThoughts.keys()]) restoreThought(thought);
+          for (const registration of frames.values()) disposeRichFrameSizing(registration);
           frames.clear();
+          retiredFramesRef.current.clear();
         };
-      }, [projection, sessionId]);
+      }, [sessionId]);
+
+      React.useLayoutEffect(() => {
+        const currentProjection = projectionRef.current;
+        if (currentProjection !== undefined && currentProjection !== null) {
+          const latestAssistantSeq = currentProjection.messages.filter((message: ProjectedMessage) => message.role === "assistant").at(-1)?.seq ?? -1;
+          for (const registration of framesRef.current.values()) {
+            registration.sessionId = sessionId;
+            if (registration.revisionId !== currentProjection.revisionId) continue;
+            const ownMessageId = Number(registration.token.split(":", 1)[0]);
+            registration.frame.contentWindow?.postMessage({
+              source: "dsh-re3-rp-rich-host",
+              token: registration.token,
+              kind: "projection",
+              state: currentProjection.variableState ?? {},
+              storage: currentProjection.frontendStorage ?? {},
+              messageCount: currentProjection.messages.length,
+              currentMessageId: Number.isSafeInteger(ownMessageId) ? ownMessageId : latestAssistantSeq,
+            }, "*");
+          }
+        }
+        scheduleScanRef.current?.();
+      }, [sessionId, projection]);
 
       if (projection === null) return h("span", { ref: anchorRef, hidden: true, "data-tavern-native-message-adapter": "inactive" });
       const anchor = h("span", { ref: anchorRef, hidden: true, "data-tavern-native-message-adapter": projection === undefined ? "loading" : "active" });
@@ -2393,7 +3211,7 @@ addEventListener('click',async event=>{const button=event.target.closest?.('[dat
 .tavern-assembly-event{position:absolute;inset:0;display:grid;box-sizing:border-box;grid-template-columns:24px minmax(0,1fr) auto;align-items:center;gap:8px;padding:0 12px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#25292f);pointer-events:none}.tavern-assembly-icon{display:grid;width:20px;height:20px;place-items:center;border-radius:6px;background:color-mix(in srgb,#5685dc 12%,transparent);color:#5685dc;font-size:14px}.tavern-assembly-copy{display:flex;min-width:0;flex-direction:column;gap:2px}.tavern-assembly-copy strong{overflow:hidden;font-size:12px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}.tavern-assembly-copy>span{overflow:hidden;color:var(--dsw-alias-label-secondary,#68717e);font-size:9px;text-overflow:ellipsis;white-space:nowrap}.tavern-assembly-delta{color:var(--dsw-alias-label-secondary,#68717e);font:550 9px/1 ui-monospace,SFMono-Regular,Consolas,monospace}td[data-tavern-assembly-cell="true"]{position:relative;min-height:42px;color:transparent!important}tr[data-selected="true"] .tavern-assembly-event{background:color-mix(in srgb,var(--dsw-alias-interactive-bg-selected,#e9f0fb) 76%,var(--dsw-alias-bg-base,#fff) 24%)}tr[data-tavern-relation="history"]{background:color-mix(in srgb,#5685dc 8%,transparent)}#trajectory-detail-panel[data-tavern-assembly-detail-active="true"]>:not([data-tavern-assembly-detail]){display:none!important}.tavern-assembly-detail{box-sizing:border-box;height:100%;overflow:auto;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#25292f);animation:tavern-surface-detail-in .2s ease-out}.tavern-assembly-detail-heading{padding:14px 16px 11px;border-bottom:1px solid var(--dsw-alias-border-l1,#e1e4e8)}.tavern-assembly-detail-heading strong{font-size:13px;font-weight:650}.tavern-assembly-detail-heading p{margin:4px 0 0;color:var(--dsw-alias-label-secondary,#68717e);font-size:10px}.tavern-assembly-tabs{display:flex;height:38px;align-items:end;gap:18px;border-bottom:1px solid var(--dsw-alias-border-l1,#e1e4e8);padding:0 16px}.tavern-assembly-tabs button{height:38px;border:0;border-bottom:2px solid transparent;padding:0 1px;background:transparent;color:var(--dsw-alias-label-secondary,#68717e);cursor:pointer;font:500 11px/1 inherit}.tavern-assembly-tabs button.is-active{border-bottom-color:#3978df;color:#3978df}.tavern-assembly-tab-body{padding:14px 16px 20px}.tavern-assembly-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.tavern-assembly-stat{display:flex;min-width:0;flex-direction:column;gap:3px;border:1px solid var(--dsw-alias-border-l1,#e1e4e8);border-radius:9px;padding:10px;background:var(--dsw-alias-bg-subtle,#f7f8fa)}.tavern-assembly-stat strong{font-size:17px;font-weight:600}.tavern-assembly-stat span{color:var(--dsw-alias-label-secondary,#68717e);font-size:9px}.tavern-assembly-section{margin-top:16px}.tavern-assembly-section h4{margin:0 0 8px;font-size:10px;font-weight:650}.tavern-assembly-changes{display:flex;flex-wrap:wrap;gap:5px}.tavern-assembly-changes span{border-radius:999px;padding:3px 7px;background:var(--dsw-alias-bg-subtle,#f1f3f5);font-size:9px}.tavern-assembly-changes .is-added{background:#edf8f1;color:#27844d}.tavern-assembly-changes .is-removed{background:#fff0f0;color:#aa4751}.tavern-assembly-changes .is-quiet{color:var(--dsw-alias-label-secondary,#68717e)}.tavern-assembly-previous{margin-top:10px;border:0;padding:0;background:transparent;color:#3978df;cursor:pointer;font:500 9px/1 inherit}.tavern-activation-list,.tavern-layout-list,.tavern-request-list{display:grid;gap:7px}.tavern-activation-item,.tavern-layout-block,.tavern-request-message{min-width:0;border:1px solid var(--dsw-alias-border-l1,#e1e4e8);border-radius:8px;background:var(--dsw-alias-bg-base,#fff)}.tavern-activation-item{border-left:3px solid #55aa73;padding:8px 9px}.tavern-activation-item.is-filtered{border-left-color:#c6cbd2;opacity:.72}.tavern-activation-item>div{display:flex;align-items:center;justify-content:space-between;gap:8px}.tavern-activation-item strong{overflow:hidden;font-size:10px;text-overflow:ellipsis;white-space:nowrap}.tavern-activation-item span,.tavern-activation-item p{color:var(--dsw-alias-label-secondary,#68717e);font-size:8px}.tavern-activation-item p{margin:5px 0 0;line-height:1.45}.tavern-layout-block{display:grid;grid-template-columns:24px minmax(0,1fr) auto;align-items:center;gap:8px;padding:8px}.tavern-layout-block.is-disabled{opacity:.48}.tavern-layout-index{color:var(--dsw-alias-label-tertiary,#8a919b);font:500 9px/1 ui-monospace,SFMono-Regular,Consolas,monospace}.tavern-layout-block strong{font-size:10px}.tavern-layout-block p{display:-webkit-box;margin:3px 0 0;overflow:hidden;color:var(--dsw-alias-label-secondary,#68717e);font-size:8px;line-height:1.35;-webkit-box-orient:vertical;-webkit-line-clamp:2}.tavern-layout-meta{color:var(--dsw-alias-label-tertiary,#858c96);font-size:8px;white-space:nowrap}.tavern-layout-injection{margin:-3px 8px 0 31px;border-left:2px solid #8ba9dd;padding:4px 8px;color:#3d72c8;background:color-mix(in srgb,#5685dc 7%,transparent);font-size:8px}.tavern-request-message{overflow:hidden}.tavern-request-message header{display:flex;align-items:center;gap:7px;border-bottom:1px solid var(--dsw-alias-border-l1,#e1e4e8);padding:6px 8px;color:var(--dsw-alias-label-secondary,#68717e);font-size:8px}.tavern-request-message header span:first-child{border-radius:4px;padding:2px 5px;font-weight:650}.tavern-request-message header .is-system{background:#edf0f4;color:#536070}.tavern-request-message header .is-user{background:#eaf2ff;color:#3972c9}.tavern-request-message header .is-assistant{background:#f2edff;color:#7758b3}.tavern-request-message pre{max-height:155px;margin:0;overflow:auto;padding:8px;color:var(--dsw-alias-label-primary,#25292f);font:9px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}@media (prefers-reduced-motion:reduce){.tavern-assembly-detail,tr[data-tavern-locate-pulse="true"]{animation:none!important}}
 tr[data-tavern-assembly-row="true"]{display:none!important}
 @media (prefers-reduced-motion:reduce){.tavern-sidebar-content{animation:none}.tavern-capability-panel,body:has(.tavern-card-capability-rail){transition:none!important}}@media (max-width:760px){.tavern-toolbar{grid-template-columns:minmax(0,1fr) auto}}
-.tavern-native-rich-display{min-width:0;width:100%}.tavern-native-message{display:flex;min-width:0;flex-direction:column;gap:16px;color:var(--dsw-alias-label-primary,#25292f);font-size:16px;line-height:28px}.tavern-native-rich-frame{display:block;box-sizing:border-box;width:100%;height:72px;border:0;background:transparent}.tavern-native-hosted-frame{display:block;box-sizing:border-box;width:100%;height:min(520px,60vh);border:1px solid var(--dsw-alias-border-l1,#dfe3e8);border-radius:14px;background:var(--dsw-alias-bg-subtle,#f7f8fa)}.tavern-native-hosted-frame.is-required-asset{height:360px}
+.tavern-native-rich-display{min-width:0;width:100%}.tavern-native-message{display:flex;min-width:0;flex-direction:column;gap:16px;color:var(--dsw-alias-label-primary,#25292f);font-size:16px;line-height:28px}.tavern-native-rich-frame-shell{position:relative;display:block;box-sizing:border-box;width:100%;height:72px;overflow:hidden;overflow-anchor:none}.tavern-native-rich-frame-shell[data-tavern-rich-shell=ready]{transition:height .18s cubic-bezier(.4,0,.2,1)}.tavern-native-rich-frame{position:absolute;top:0;left:0;display:block;box-sizing:border-box;width:100%;height:72px;border:0;background:transparent}.tavern-native-hosted-frame{display:block;box-sizing:border-box;width:100%;height:min(520px,60vh);border:1px solid var(--dsw-alias-border-l1,#dfe3e8);border-radius:14px;background:var(--dsw-alias-bg-subtle,#f7f8fa)}.tavern-native-hosted-frame.is-required-asset{height:360px}@media (prefers-reduced-motion:reduce){.tavern-native-rich-frame-shell[data-tavern-rich-shell=ready]{transition:none}}
 .tavern-native-companion-frame{position:fixed;z-index:90;top:0;left:0;display:block;width:100vw;height:100vh;border:0;clip-path:inset(0 100% 100% 0);pointer-events:none;background:transparent;opacity:1;filter:none;mix-blend-mode:normal;color-scheme:light dark}
 .tavern-companion-permission{position:fixed;z-index:98;top:72px;left:16px;display:grid;max-width:360px;gap:8px;padding:14px;border:1px solid #e4a11b;border-radius:12px;background:#fff8e8;color:#3a2b12;box-shadow:0 12px 32px #0003;font-size:13px;line-height:20px}.tavern-companion-permission button{cursor:pointer;justify-self:start;border:0;border-radius:999px;padding:8px 14px;background:#1f6feb;color:#fff;font-weight:700}
 :root{--tavern-capability-rail-width:64px;--tavern-capability-panel-width:clamp(460px,35vw,560px)}
