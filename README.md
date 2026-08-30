@@ -4,77 +4,123 @@
 [![GitHub Release](https://img.shields.io/github/v/release/RiemannRe3/DSH-RolePlay)](https://github.com/RiemannRe3/DSH-RolePlay/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-DSH RolePlay 是 DeepSeek Harness 的 Tavern 角色卡插件。导入 Character Card V2/V3 PNG 或 JSON，选一个开场，就能开始玩。
+DSH RolePlay 是 DeepSeek Harness 的角色扮演插件。项目方向是 Agent RolePlay；当前版本先解决 SillyTavern 角色卡及其常用生态在 DSH 中的导入和运行。
 
-角色卡 · 多开场 · 世界书 · 预设 · Persona · Regex · EJS / iframe · MVU
+支持 Character Card V2/V3、多个开场、世界书、预设、Persona、Regex、EJS、MVU、TavernHelper 常用接口和卡内前端。
+
+![DSH RolePlay 的卡库、对话和卡内界面](media/readme/18-hero-suniannian.png)
+
+卡库、对话和右侧功能页在同一个界面里。选卡、换开场、调世界书或查看脚本状态，不用离开当前对话。
 
 ## Windows 安装
 
-> [!TIP]
-> **三条命令，装好就能开始。**
->
-> ```powershell
-> npm install --global @deepseek-ai/dsh@0.1.1-rc.2
-> dsh plugin --profile web add @riemannre3/dsh-roleplay
-> dsh web
-> ```
->
-> 打开终端中显示的本机地址，在“设置 → 模型”中配置模型和 API Key，然后进入“酒馆”导入角色卡。
->
-> [下载最新版](https://github.com/RiemannRe3/DSH-RolePlay/releases/latest) · [npm](https://www.npmjs.com/package/@riemannre3/dsh-roleplay) · [问题反馈](https://github.com/RiemannRe3/DSH-RolePlay/issues)
+### 1. 准备 Node.js
 
-![玄净在 DSH RolePlay 中的卡库、修行札和角色详情](https://raw.githubusercontent.com/RiemannRe3/DSH-RolePlay/v0.1.5/media/readme/10-hero.png)
+需要以下任一 Node.js 版本：
 
-卡库、对话、卡内界面和角色详情可以同时展开。
+- Node.js 22.19.0 至 22.x
+- Node.js 24.13.1 至 24.x
 
-## 最近完成的卡
+在 PowerShell 中检查当前版本：
 
-### 玄净 · 云山修行札
+```powershell
+node --version
+npm --version
+```
 
-![玄净在真实一轮对话后的修行札和前端运行状态](https://raw.githubusercontent.com/RiemannRe3/DSH-RolePlay/v0.1.5/media/readme/11-xuanjing-live.png)
+如果命令不存在，先从 [Node.js 官网](https://nodejs.org/en/download) 安装符合要求的版本，再重新打开 PowerShell。
 
-修行状态、人物关系和下一步行动会跟着对话更新。
+### 2. 安装 DeepSeek Harness
 
-### 苏念念 · 银杏道
+```powershell
+npm install --global @deepseek-ai/dsh@0.1.1-rc.2
+```
 
-![苏念念的状态页和行动选项](https://raw.githubusercontent.com/RiemannRe3/DSH-RolePlay/v0.1.5/media/readme/12-suniannian.png)
+安装完成后检查命令是否可用：
 
-轻量状态页保留在消息里，按钮可以直接接下一句。
+```powershell
+dsh --version
+```
 
-### 顾清 · 大理寺案牍
+### 3. 安装 DSH RolePlay
 
-![顾清的西市浮尸案案牍](https://raw.githubusercontent.com/RiemannRe3/DSH-RolePlay/v0.1.5/media/readme/13-guqing.png)
+```powershell
+dsh plugin --profile web add @riemannre3/dsh-roleplay
+```
 
-已确认事实、待验线索和时限写进同一份案牍。
+这条命令会把插件安装到 DSH 的 `web` profile。更新插件时再次执行同一条命令即可。
 
-三张卡均由 RiemannRe3 基于 Foreverse Team 的开源角色卡改作。原卡、修改说明和 CC BY 4.0 许可见 [内容与许可说明](THIRD_PARTY_NOTICES.md)。
+### 4. 启动 DSH Web
+
+```powershell
+dsh web
+```
+
+保持这个 PowerShell 窗口运行，打开终端中显示的本机地址。
+
+首次使用时：
+
+1. 打开“设置 → 模型”。
+2. 选择模型提供商，填写 API Key 和模型名称。
+3. 回到“对话”，进入左侧“酒馆”。
+4. 点击“导入”，选择 Character Card V2/V3 的 PNG 或 JSON。
+5. 展开角色卡，选择开场并创建新游戏。
+
+进入对话后，页面右侧可以打开世界书、预设、Regex、前端、卡片和 Persona。
+
+### 5. 启用与停用
+
+![在 DSH 设置中启用或停用 DSH RolePlay](media/readme/09-plugin-settings.jpg)
+
+打开“设置 → 插件 → DSH RolePlay”，可以随时启用或停用插件。停用后，“酒馆”入口和相关运行能力不会加载；已经导入的角色卡和会话数据仍会保留，重新启用即可继续使用。
+
+### 6. 下载与帮助
+
+[下载最新版](https://github.com/RiemannRe3/DSH-RolePlay/releases/latest) · [npm](https://www.npmjs.com/package/@riemannre3/dsh-roleplay) · [问题反馈](https://github.com/RiemannRe3/DSH-RolePlay/issues)
+
+## 角色卡
+
+![角色卡详情页](media/readme/04-card.jpg)
+
+角色描述、场景、首条消息、备选开场和扩展字段都可以直接查看和编辑。支持 Character Card V2/V3 的 PNG 与 JSON。
+
+## Persona
+
+![Persona 管理页](media/readme/05-persona.jpg)
+
+Persona 独立管理，可以在不同对话中切换，不必反复改角色卡。
 
 ## 世界书
 
-![玄净角色卡的世界书条目](https://raw.githubusercontent.com/RiemannRe3/DSH-RolePlay/v0.1.5/media/readme/14-worldbook.png)
+![世界书编辑页](media/readme/14-worldbook.png)
 
-条目、触发词、插入位置和执行顺序都在面板里。
+世界书条目有触发词、插入位置、顺序和启用状态。角色卡自带的世界书会随卡导入，也可以单独调整。
 
-## 预设与本轮上下文
+## 预设与上下文
 
-![对话补全预设编辑页](https://raw.githubusercontent.com/RiemannRe3/DSH-RolePlay/v0.1.5/media/readme/15-preset.png)
+![对话补全预设编辑页](media/readme/15-preset.png)
 
-![一次真实请求的上下文装配结果](https://raw.githubusercontent.com/RiemannRe3/DSH-RolePlay/v0.1.5/media/readme/16-context.png)
+预设按槽位编辑，角色描述、世界书、历史消息和系统提示的顺序可以直接调整。
 
-预设按槽位编辑；每次请求都能查看来源、角色、Token 和实际内容。
+![一次真实请求的上下文装配结果](media/readme/16-context.png)
 
-## 卡内前端
+发送前可以检查本轮实际上下文，看到每一段内容来自哪里，以及最终使用的角色和 Token。
 
-![玄净的消息界面与前端运行面板](https://raw.githubusercontent.com/RiemannRe3/DSH-RolePlay/v0.1.5/media/readme/17-frontend.png)
+## MVU、EJS 与卡内前端
 
-消息内可以放状态页、按钮和 iframe。右侧面板会显示脚本、运行事件、MVU 状态与错误。
+![卡内界面与前端运行面板](media/readme/17-frontend.png)
 
-## 开始使用
+卡内 HTML、按钮和 iframe 可以直接显示在消息里。右侧前端页集中查看脚本、运行事件、MVU 状态和错误；EJS、Regex 与 TavernHelper 常用接口也由兼容层接入。
 
-1. 打开 DSH Web，进入“酒馆”。
-2. 导入角色卡 PNG 或 JSON。
-3. 选择开场，创建对话。
-4. 从右侧打开世界书、预设、Regex、前端、卡片或 Persona。
+头图和各功能页来自不同演示内容，用来检查现代对话界面、复杂世界书、变量更新和卡内脚本。来源、修改内容和许可见 [内容与许可说明](THIRD_PARTY_NOTICES.md)。
+
+## 现在支持
+
+- Character Card V2/V3 PNG 与 JSON
+- 多开场、世界书、预设、Persona 与 Regex
+- EJS、iframe、MVU 与 TavernHelper 常用接口
+- 卡内 HTML、交互按钮和独立前端运行状态
+- 会话保存、刷新恢复与重启恢复
 
 <details>
 <summary>更新、卸载、离线安装与源码构建</summary>
